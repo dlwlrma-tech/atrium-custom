@@ -68,7 +68,8 @@ WidgetStackPlan ComputeWidgetStackPlan(const std::vector<StackWindow>& windows, 
         }
     }
     const bool desktopIsFront = plan.desktopHost && (!plan.lowestApp || desktopIdx < lowestIdx);
-    plan.showDesktop = desktopIsFront && (fgIsHost || (wasShowDesktop && fgIsOurs));
+    const bool noAppDesktop = plan.desktopHost && !plan.lowestApp && (!fgIsOurs || wasShowDesktop);
+    plan.showDesktop = noAppDesktop || (desktopIsFront && (fgIsHost || (wasShowDesktop && fgIsOurs)));
     if (plan.showDesktop || (!plan.lowestApp && plan.desktopHost))
         plan.after = above ? above : HWND_TOP;
     else

@@ -113,6 +113,7 @@ private:
     bool enabled_ = true;
     bool oleReady_ = false;
     bool wasShowDesktop_ = false;
+    bool desktopIconsHidden_ = false;
     float radius_ = 18.f;
     uint64_t nextGen_ = 1;
     ULONGLONG lastDesktopClickMs_ = 0;

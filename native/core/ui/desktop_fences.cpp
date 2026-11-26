@@ -690,7 +690,8 @@ void DesktopFences::OnDesktopMouseDown(POINT screen)
 {
     const HWND list = FindDesktopListView();
     winrt::com_ptr<IFolderView2> view;
-    if (!list || !GetDesktopFolderView(view) || !IsBlankDesktopPoint(view.get(), list, screen)) {
+    const bool blank = desktopIconsHidden_ || (list && GetDesktopFolderView(view) && IsBlankDesktopPoint(view.get(), list, screen));
+    if (!blank) {
         lastDesktopClickMs_ = 0;
         return;
     }
@@ -710,17 +711,13 @@ void DesktopFences::OnDesktopMouseDown(POINT screen)
 
 void DesktopFences::ToggleDesktopIcons()
 {
-    winrt::com_ptr<IFolderView2> view;
-    if (!GetDesktopFolderView(view))
+    const HWND list = FindDesktopListView();
+    if (!list)
         return;
-    DWORD flags = 0;
-    constexpr DWORD hiddenMask = FWF_NOICONS | FWF_HIDEFILENAMES;
-    if (FAILED(view->GetCurrentFolderFlags(&flags)) || !(flags & FWF_DESKTOP))
-        return;
-    const DWORD nextFlags = (flags & hiddenMask) ? (flags & ~hiddenMask) : (flags | hiddenMask);
-    const HRESULT changed = view->SetCurrentFolderFlags(hiddenMask, nextFlags);
-    if (FAILED(changed))
-        Log(L"desktop icons: could not toggle visibility (0x%08X)", unsigned(changed));
+    desktopIconsHidden_ = !IsWindowVisible(list);
+    desktopIconsHidden_ = !desktopIconsHidden_;
+    ShowWindow(list, desktopIconsHidden_ ? SW_HIDE : SW_SHOWNOACTIVATE);
+    Log(L"desktop icons: %s", desktopIconsHidden_ ? L"hidden" : L"shown");
 }
 
 void CALLBACK DesktopFences::OnWinEvent(HWINEVENTHOOK, DWORD, HWND window, LONG object, LONG child, DWORD, DWORD)
