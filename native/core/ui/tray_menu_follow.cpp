@@ -35,6 +35,8 @@ struct MenuFollow {
     POINT placed{};
 } g_follow;
 
+POINT MenuPlace(POINT at, int w, int h, const RECT& avoidBar);
+
 void CALLBACK FollowExpired(HWND, UINT, UINT_PTR timer, DWORD)
 {
     if (timer != g_follow.timer)
