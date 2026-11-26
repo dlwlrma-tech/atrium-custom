@@ -25,6 +25,8 @@ struct WidgetStackPlan {
 
 WidgetStackPlan ComputeWidgetStackPlan(const std::vector<StackWindow>& windows, const RECT& monitorRect, HWND fgRoot, bool fgIsOurs, bool wasShowDesktop);
 std::wstring WindowClassOf(HWND h);
+HWND FindDesktopDefView();
+void AttachDesktopOwner(HWND hwnd);
 std::vector<StackWindow> CollectStackSnapshot(const std::vector<HWND>& widgetHwnds);
 void ApplyWidgetZOrder(const std::vector<HWND>& widgetHwnds, const WidgetStackPlan& plan, DWORD& swpErr);
 

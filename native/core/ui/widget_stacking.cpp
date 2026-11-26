@@ -88,6 +88,37 @@ std::wstring WindowClassOf(HWND h)
     return cls;
 }
 
+HWND FindDesktopDefView()
+{
+    if (HWND progman = FindWindowW(L"Progman", nullptr))
+        if (HWND view = FindWindowExW(progman, nullptr, L"SHELLDLL_DefView", nullptr))
+            return view;
+    HWND found = nullptr;
+    EnumWindows(
+        [](HWND top, LPARAM param) -> BOOL {
+            if (HWND view = FindWindowExW(top, nullptr, L"SHELLDLL_DefView", nullptr)) {
+                *reinterpret_cast<HWND*>(param) = view;
+                return FALSE;
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&found));
+    return found;
+}
+
+void AttachDesktopOwner(HWND hwnd)
+{
+    if (!hwnd)
+        return;
+    HWND owner = FindDesktopDefView();
+    if (!owner)
+        owner = FindWindowW(L"Progman", nullptr);
+    if (!owner)
+        return;
+    if (reinterpret_cast<HWND>(GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT)) != owner)
+        SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(owner));
+}
+
 std::vector<StackWindow> CollectStackSnapshot(const std::vector<HWND>& widgetHwnds)
 {
     const DWORD ownPid = GetCurrentProcessId();
@@ -126,15 +157,18 @@ std::vector<StackWindow> CollectStackSnapshot(const std::vector<HWND>& widgetHwn
 void ApplyWidgetZOrder(const std::vector<HWND>& widgetHwnds, const WidgetStackPlan& plan, DWORD& swpErr)
 {
     const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
-    for (HWND hw : widgetHwnds)
+    for (HWND hw : widgetHwnds) {
+        AttachDesktopOwner(hw);
         if (!IsWindowVisible(hw) || IsIconic(hw))
             ShowWindow(hw, SW_SHOWNOACTIVATE);
+    }
     for (HWND hw : widgetHwnds)
         if (GetWindowLongPtrW(hw, GWL_EXSTYLE) & WS_EX_TOPMOST)
             SetWindowPos(hw, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
     if (plan.desktopHost && !widgetHwnds.empty()) {
+        const bool desktopRaised = plan.lowestApp && IsBelowInZOrder(plan.desktopHost, plan.lowestApp);
         const bool alreadyInLayer = std::ranges::all_of(widgetHwnds, [&](HWND hw) {
-            return (plan.after == HWND_TOP || IsBelowInZOrder(plan.after, hw)) && IsBelowInZOrder(hw, plan.desktopHost);
+            return (desktopRaised || plan.after == HWND_TOP || IsBelowInZOrder(plan.after, hw)) && IsBelowInZOrder(hw, plan.desktopHost);
         });
         if (alreadyInLayer)
             return;

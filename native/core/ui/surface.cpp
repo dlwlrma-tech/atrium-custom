@@ -1,4 +1,5 @@
 #include "ui/surface.h"
+#include "ui/widget_stacking.h"
 
 #include "clock.h"
 #include "render/capture.h"
@@ -94,6 +95,8 @@ Surface::Surface(HINSTANCE instance, const wchar_t* title, bool activatable, flo
     DWORD ex = WS_EX_TOOLWINDOW | (desktopLayer ? 0 : WS_EX_TOPMOST) | WS_EX_NOREDIRECTIONBITMAP | (activatable ? 0 : WS_EX_NOACTIVATE) |
                (clickThrough ? (WS_EX_TRANSPARENT | WS_EX_LAYERED) : 0);
     hwnd_ = CreateWindowExW(ex, kClass, title, WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, instance, this);
+    if (desktopLayer && hwnd_)
+        AttachDesktopOwner(hwnd_);
     if (clickThrough)
         SetLayeredWindowAttributes(hwnd_, 0, 255, LWA_ALPHA);
     SetWindowLongPtrW(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
