@@ -1748,8 +1748,8 @@ bool DesktopFences::HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, L
                     bool insideAnyFence = false;
                     for (const auto& other : fences_) {
                         if (other->surface && other->surface->Visible()) {
-                            const RECT r = other->surface->Rect();
-                            if (PtInRect(&r, dropPt)) {
+                            const RECT fenceRect = other->surface->Rect();
+                            if (PtInRect(&fenceRect, dropPt)) {
                                 insideAnyFence = true;
                                 break;
                             }
