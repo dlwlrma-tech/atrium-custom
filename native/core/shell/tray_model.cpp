@@ -484,7 +484,7 @@ bool ShowOverflow(IUIAutomation* uia)
     if (tray && !bridge) {
         // Classic shell (Win10): check responsiveness and post BN_CLICKED directly to TrayNotifyWnd
         // instead of BM_CLICK, avoiding button capture hangs on a hidden Shell_TrayWnd.
-        if (!ShellResponsive(tray, 500))
+        if (!IsWindowVisible(tray) || !ShellResponsive(tray, 500))
             return false;
         HWND notify = FindWindowExW(tray, nullptr, L"TrayNotifyWnd", nullptr);
         HWND button = notify ? FindWindowExW(notify, nullptr, L"Button", nullptr) : nullptr;

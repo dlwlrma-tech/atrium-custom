@@ -64,7 +64,7 @@ private:
     void Build();
     void Clear();
     Fence& CreateFence(const std::wstring& id, const std::wstring& title, const std::wstring& folder, float x, float y, float w, float h, bool locked,
-                       bool alwaysExpanded);
+                       bool alwaysExpanded, bool listView = false);
     void RemoveFence(const std::wstring& id);
     Fence* FindFence(const std::wstring& id);
     float Scale() const;
@@ -84,6 +84,8 @@ private:
     void ShowFenceMenu(Fence& f, POINT screen, int itemIndex);
     std::wstring PickFolderDialog(const std::wstring& initial) const;
     void MoveItemToDesktop(Fence& f, const Item& item);
+    void BeginRename(Fence& f);
+    void EndRename(Fence& f, bool commit);
 
     friend struct FenceDropTarget;
 

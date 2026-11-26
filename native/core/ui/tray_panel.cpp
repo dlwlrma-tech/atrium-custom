@@ -465,12 +465,9 @@ void TrayPanel::Paint(Canvas& c)
         label = pinMode_       ? std::wstring(Tr(L"Click icons to pin to taskbar")) :
                 icons_.empty() ? std::wstring(Tr(L"Tray")) :
                                  TrFormat(L"%d icons", int(icons_.size()));
-    std::wstring sys = Tr(L"System tray");
-    float bw = c.TextWidth(sys, 11.5f) + 20;
-    D2D1_RECT_F b = D2D1::RectF(w - m - bw, footTop, w - m, footTop + kFooterH);
     std::wstring pinText = pinMode_ ? Tr(L"Done") : Tr(L"Pin");
-    float pw = c.TextWidth(pinText, 11.5f) + 18;
-    D2D1_RECT_F pb = D2D1::RectF(b.left - 6 - pw, footTop, b.left - 6, footTop + kFooterH);
+    float pw = c.TextWidth(pinText, 11.5f) + 20;
+    D2D1_RECT_F pb = D2D1::RectF(w - m - pw, footTop, w - m, footTop + kFooterH);
     c.Text(label, D2D1::RectF(m, footTop, pb.left - 8, footTop + kFooterH), 12, hover_.starts_with(L"icon:") ? t.text : t.subtext);
     float hvPin = Hover(c, L"pinmode", hover_ == L"pinmode");
     D2D1_COLOR_F pinFill = pinMode_ ? D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.30f + 0.16f * hvPin) :
@@ -478,10 +475,6 @@ void TrayPanel::Paint(Canvas& c)
     c.Fill(pb, (pb.bottom - pb.top) / 2, pinFill);
     c.Text(pinText, pb, 11.5f, t.text, DWRITE_FONT_WEIGHT_NORMAL, 1);
     hits_.push_back({pb, L"pinmode"});
-    float hv = Hover(c, L"system", hover_ == L"system");
-    c.Fill(b, (b.bottom - b.top) / 2, Alpha(pressed_ == L"system" ? t.press : t.hover, 0.45f + 0.55f * hv));
-    c.Text(sys, b, 11.5f, t.text, DWRITE_FONT_WEIGHT_NORMAL, 1);
-    hits_.push_back({b, L"system"});
 }
 
 std::wstring TrayPanel::HitAt(POINT pt) const
@@ -526,8 +519,9 @@ void TrayPanel::Activate(const std::wstring& id, bool right)
         return;
     }
     const RECT cell = CellScreenRect(i);
-    if (right) {
-        POINT at;
+    model_.SetHostPlaces(cell);
+    {
+        POINT at{};
         GetCursorPos(&at);
         FollowTrayMenu(at, selected.exe);
     }
@@ -608,7 +602,7 @@ bool TrayPanel::Message(UINT m, WPARAM w, LPARAM l, LRESULT& result)
     case WM_MOUSEMOVE:
         KillTimer(surface_.Hwnd(), kHoverTimer);
         if ((w & MK_LBUTTON) && pressed_.starts_with(L"icon:") && !pinMode_) {
-            if (!draggingPin_ && std::abs(pt.y - pressPt_.y) > GetSystemMetrics(SM_CYDRAG) * 2) {
+            if (!draggingPin_ && (std::abs(pt.x - pressPt_.x) > GetSystemMetrics(SM_CXDRAG) || std::abs(pt.y - pressPt_.y) > GetSystemMetrics(SM_CYDRAG))) {
                 draggingPin_ = true;
                 HideTip();
             }
@@ -631,7 +625,7 @@ bool TrayPanel::Message(UINT m, WPARAM w, LPARAM l, LRESULT& result)
     case WM_MOUSELEAVE:
         tracking_ = false;
         HideTip();
-        if (!pressed_.empty()) {
+        if (!pressed_.empty() && !draggingPin_ && GetCapture() != surface_.Hwnd()) {
             pressed_.clear();
             surface_.Invalidate();
         }
@@ -676,7 +670,7 @@ bool TrayPanel::Message(UINT m, WPARAM w, LPARAM l, LRESULT& result)
             surface_.Invalidate();
             POINT cur{};
             const RECT win = surface_.Rect();
-            if (dragged && onTogglePin && GetCursorPos(&cur) && !PtInRect(&win, cur) && cur.y >= win.bottom - 8)
+            if (dragged && onTogglePin && GetCursorPos(&cur) && (PtInRect(&bar_, cur) || (!PtInRect(&win, cur) && cur.y >= win.bottom - 12)))
                 onTogglePin(TrayPinKey(*dragged));
             return true;
         }

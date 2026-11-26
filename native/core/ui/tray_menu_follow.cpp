@@ -23,6 +23,7 @@ namespace {
 struct MenuFollow {
     HWINEVENTHOOK hook = nullptr;
     POINT at{};
+    RECT avoidBar{};
     std::wstring exe;
     UINT_PTR timer = 0;
     DWORD pid = 0;
@@ -40,11 +41,32 @@ void CALLBACK FollowExpired(HWND, UINT, UINT_PTR timer, DWORD)
 }
 
 // Next to the click: above and to the right of it, else below or to the left; in the work area.
-POINT MenuPlace(POINT at, int w, int h)
+POINT MenuPlace(POINT at, int w, int h, const RECT& avoidBar)
 {
     MONITORINFO mi{sizeof(mi)};
     GetMonitorInfoW(MonitorFromPoint(at, MONITOR_DEFAULTTONEAREST), &mi);
-    return tray::PlaceMenu(at, w, h, mi.rcWork);
+    RECT area = mi.rcWork;
+    if (!IsRectEmpty(&avoidBar)) {
+        const LONG midBar = (avoidBar.top + avoidBar.bottom) / 2;
+        const LONG midMon = (mi.rcMonitor.top + mi.rcMonitor.bottom) / 2;
+        if (midBar >= midMon)
+            area.bottom = std::min(area.bottom, avoidBar.top - 6);
+        else
+            area.top = std::max(area.top, avoidBar.bottom + 6);
+    }
+    return tray::PlaceMenu(at, w, h, area);
+}
+
+bool SameExeOrVendor(const std::wstring& a, const std::wstring& b)
+{
+    if (CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_EQUAL)
+        return true;
+    auto containsCI = [](const std::wstring& s, const wchar_t* sub) {
+        return StrStrIW(s.c_str(), sub) != nullptr;
+    };
+    if (containsCI(a, L"\\NVIDIA Corporation\\") && containsCI(b, L"\\NVIDIA Corporation\\"))
+        return true;
+    return false;
 }
 
 bool FollowCancelKeyDown()
@@ -97,7 +119,7 @@ void CALLBACK MenuShown(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LO
         }
         CloseHandle(process);
     }
-    if (g_follow.exe.empty() || path.empty() || elevated || CompareStringOrdinal(path.c_str(), -1, g_follow.exe.c_str(), -1, TRUE) != CSTR_EQUAL)
+    if (g_follow.exe.empty() || path.empty() || elevated || !SameExeOrVendor(path, g_follow.exe))
         return;
     wchar_t cls[64]{};
     if (!GetClassNameW(hwnd, cls, 64))
@@ -116,10 +138,10 @@ void CALLBACK MenuShown(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LO
             return;
         // A pixel or two is the app rounding to its scale.
         if ((std::abs(r.left - g_follow.placed.x) > 2 || std::abs(r.top - g_follow.placed.y) > 2) && g_follow.moves < 3) {
-            const POINT p = MenuPlace(g_follow.at, r.right - r.left, r.bottom - r.top);
+            const POINT p = MenuPlace(g_follow.at, r.right - r.left, r.bottom - r.top, g_follow.avoidBar);
             g_follow.placed = p;
             ++g_follow.moves;
-            SetWindowPos(hwnd, nullptr, p.x, p.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            SetWindowPos(hwnd, HWND_TOPMOST, p.x, p.y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
             Log(L"tray: the menu went to %ld,%ld again: back to %ld,%ld", r.left, r.top, p.x, p.y);
         }
         return;
@@ -133,12 +155,15 @@ void CALLBACK MenuShown(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LO
     if (w < 40 || h < 20 || w > (mi.rcWork.right - mi.rcWork.left) * 3 / 5 || h > (mi.rcWork.bottom - mi.rcWork.top) * 19 / 20)
         return; // a mark, a balloon, a window: not a menu
     const POINT at = g_follow.at;
-    if (!tray::ShouldMoveFollowedMenu(r, at, mi.rcMonitor, mi.rcWork, nativeMenu)) {
+    RECT barOverlap{};
+    const bool hitsBar = !IsRectEmpty(&g_follow.avoidBar) && IntersectRect(&barOverlap, &r, &g_follow.avoidBar) != FALSE;
+    if (!hitsBar && !tray::ShouldMoveFollowedMenu(r, at, mi.rcMonitor, mi.rcWork, nativeMenu)) {
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         StopTrayMenuFollow();
         return; // the app put it by the pointer itself and it fits
     }
-    const POINT p = MenuPlace(at, w, h);
-    if (!SetWindowPos(hwnd, nullptr, p.x, p.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)) {
+    const POINT p = MenuPlace(at, w, h, g_follow.avoidBar);
+    if (!SetWindowPos(hwnd, HWND_TOPMOST, p.x, p.y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE)) {
         Log(L"tray: %s's menu (%s) at %ld,%ld could not be moved (%lu)", name, cls, r.left, r.top, GetLastError());
         StopTrayMenuFollow();
         return;
@@ -170,7 +195,7 @@ void StopTrayMenuFollow()
     g_follow.pid = 0;
 }
 
-void FollowTrayMenu(POINT at, const std::wstring& exe)
+void FollowTrayMenu(POINT at, const std::wstring& exe, RECT avoidBar)
 {
     StopTrayMenuFollow();
     if (exe.empty() || _wcsicmp(PathFindFileNameW(exe.c_str()), L"explorer.exe") == 0)
@@ -180,6 +205,7 @@ void FollowTrayMenu(POINT at, const std::wstring& exe)
         return;
     g_follow.clickInput = input.dwTime;
     g_follow.at = at;
+    g_follow.avoidBar = avoidBar;
     g_follow.exe = exe;
     g_follow.until = GetTickCount64() + 3000; // slow apps take a while to show it
     g_follow.hook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_LOCATIONCHANGE, nullptr, MenuShown, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);

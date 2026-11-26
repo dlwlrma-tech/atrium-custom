@@ -10,6 +10,7 @@
 #include "ui/widget_stacking.h"
 #include "win32_path.h"
 
+#include <imm.h>
 #include <ole2.h>
 #include <shellapi.h>
 #include <shellscalingapi.h>
@@ -37,13 +38,15 @@ constexpr UINT WM_FENCE_LOADED = WM_APP + 0x81;
 constexpr UINT_PTR kCollapseTimer = 0x5F01;
 constexpr UINT_PTR kRefreshTimer = 0x5F02;
 constexpr UINT_PTR kRestackTimer = 0x5F03;
-constexpr UINT kCollapseDelayMs = 260;
+constexpr UINT kCollapseDelayMs = 60;
 constexpr UINT kRefreshMs = 5000;
 constexpr float kHeaderH = 34.f;
 constexpr float kPadX = 10.f;
 constexpr float kPadY = 8.f;
 constexpr float kCellW = 76.f;
 constexpr float kCellH = 78.f;
+constexpr float kListRowH = 32.f;
+constexpr float kListIconSz = 20.f;
 constexpr float kIconSz = 36.f;
 constexpr float kMinW = 220.f;
 constexpr float kMaxW = 920.f;
@@ -229,11 +232,19 @@ struct DesktopFences::Fence {
     float x = 80.f, y = 80.f, w = 360.f, h = 420.f;
     bool locked = false;
     bool alwaysExpanded = true;
+    bool listView = false;
     bool expanded = true;
+    bool renaming = false;
+    std::wstring editText;
+    size_t editCaret = 0;
+    ULONGLONG lastTitleClickMs = 0;
     bool dragHighlight = false;
     bool tracking = false;
     bool moving = false;
     bool resizing = false;
+    bool draggingItem = false;
+    int pressItem = -1;
+    POINT pressPt{};
     POINT dragStartScreen{};
     float dragStartX = 0, dragStartY = 0, dragStartW = 0, dragStartH = 0;
     float scrollY = 0;
@@ -246,7 +257,7 @@ struct DesktopFences::Fence {
     std::vector<Item> items;
     std::unique_ptr<Surface> surface;
     winrt::com_ptr<IDropTarget> dropTarget;
-    D2D1_RECT_F lockRect{}, pinRect{}, menuRect{};
+    D2D1_RECT_F lockRect{}, viewRect{}, pinRect{}, menuRect{}, titleRect{};
 };
 
 DesktopFences::DesktopFences(HINSTANCE instance) : instance_(instance)
@@ -366,7 +377,6 @@ void DesktopFences::SetExpanded(Fence& f, bool expanded)
     if (!f.expanded)
         f.hoverItem = -1;
     PlaceFence(f, false);
-    Restack();
 }
 
 void DesktopFences::SetEnabled(bool on)
@@ -476,7 +486,7 @@ void DesktopFences::Load()
         if (title.empty())
             title = BaseName(folder);
         CreateFence(id, title, folder, num(L"x", 80.f), num(L"y", 80.f), std::clamp(num(L"w", 360.f), kMinW, kMaxW),
-                    std::clamp(num(L"h", 420.f), kMinH, kMaxH), flag(L"locked", false), flag(L"alwaysExpanded", true));
+                    std::clamp(num(L"h", 420.f), kMinH, kMaxH), flag(L"locked", false), flag(L"alwaysExpanded", true), flag(L"listView", false));
     }
 }
 
@@ -494,6 +504,7 @@ void DesktopFences::Save() const
         o.SetNamedValue(L"h", json::JsonValue::CreateNumberValue(f->h));
         o.SetNamedValue(L"locked", json::JsonValue::CreateBooleanValue(f->locked));
         o.SetNamedValue(L"alwaysExpanded", json::JsonValue::CreateBooleanValue(f->alwaysExpanded));
+        o.SetNamedValue(L"listView", json::JsonValue::CreateBooleanValue(f->listView));
         arr.Append(o);
     }
     json::JsonObject root;
@@ -511,7 +522,7 @@ void DesktopFences::Build()
 }
 
 DesktopFences::Fence& DesktopFences::CreateFence(const std::wstring& id, const std::wstring& title, const std::wstring& folder, float x, float y, float w,
-                                                 float h, bool locked, bool alwaysExpanded)
+                                                 float h, bool locked, bool alwaysExpanded, bool listView)
 {
     auto f = std::make_unique<Fence>();
     f->id = id;
@@ -523,9 +534,11 @@ DesktopFences::Fence& DesktopFences::CreateFence(const std::wstring& id, const s
     f->h = h;
     f->locked = locked;
     f->alwaysExpanded = alwaysExpanded;
+    f->listView = listView;
     f->expanded = alwaysExpanded;
-    f->surface = std::make_unique<Surface>(instance_, L"Atrium Fence", true, 12, true);
+    f->surface = std::make_unique<Surface>(instance_, L"Atrium Fence", true, 12.f, true);
     f->surface->SetRadius(radius_);
+    f->surface->ReserveResize(D2D1::SizeF(w, h));
     Fence* raw = f.get();
     f->surface->paint = [this, raw](Canvas& c) { PaintFence(*raw, c); };
     f->surface->message = [this, raw](UINT m, WPARAM wp, LPARAM lp, LRESULT& r) { return HandleFenceMessage(*raw, m, wp, lp, r); };
@@ -700,12 +713,14 @@ void DesktopFences::PaintFence(Fence& f, Canvas& c)
     if (f.dragHighlight)
         c.Stroke(D2D1::RectF(1.5f, 1.5f, w - 1.5f, h - 1.5f), std::max(4.f, radius_ - 1.5f), D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.85f), 2.f);
 
-    // Header bar controls: lock on left, title centered, expand-mode pin and menu on right.
+    // Header bar controls: lock on left, title centered, view-mode, expand-mode pin, and menu on right.
     const float btnSz = 24.f;
     const float btnY = (kHeaderH - btnSz) / 2.f;
     f.lockRect = D2D1::RectF(8.f, btnY, 8.f + btnSz, btnY + btnSz);
     f.menuRect = D2D1::RectF(w - 8.f - btnSz, btnY, w - 8.f, btnY + btnSz);
-    f.pinRect = D2D1::RectF(f.menuRect.left - 4.f - btnSz, btnY, f.menuRect.left - 4.f, btnY + btnSz);
+    f.pinRect = D2D1::RectF(f.menuRect.left - 3.f - btnSz, btnY, f.menuRect.left - 3.f, btnY + btnSz);
+    f.viewRect = D2D1::RectF(f.pinRect.left - 3.f - btnSz, btnY, f.pinRect.left - 3.f, btnY + btnSz);
+    f.titleRect = D2D1::RectF(f.lockRect.right + 6.f, 4.f, f.viewRect.left - 6.f, kHeaderH - 4.f);
     auto drawHeaderBtn = [&](const D2D1_RECT_F& r, const wchar_t* id, const wchar_t* glyph, bool active) {
         if (f.hoverBtn == id)
             c.Fill(r, 7.f, t.hover);
@@ -714,9 +729,20 @@ void DesktopFences::PaintFence(Fence& f, Canvas& c)
         c.Glyph(glyph, r, 12.f, active ? D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.95f) : t.text);
     };
     drawHeaderBtn(f.lockRect, L"lock", f.locked ? L"\uE72E" : L"\uE785", f.locked);
+    drawHeaderBtn(f.viewRect, L"view", f.listView ? L"\uE8FD" : L"\uF0E2", f.listView);
     drawHeaderBtn(f.pinRect, L"pin", f.alwaysExpanded ? L"\uE840" : L"\uE70D", f.alwaysExpanded);
     drawHeaderBtn(f.menuRect, L"menu", L"\uE712", false);
-    c.Text(f.title, D2D1::RectF(f.lockRect.right + 6.f, 0.f, f.pinRect.left - 6.f, kHeaderH), 12.5f, t.text, DWRITE_FONT_WEIGHT_SEMI_BOLD, 1);
+    if (f.renaming) {
+        c.Fill(f.titleRect, 7.f, Alpha(t.hover, 1.4f));
+        c.Stroke(f.titleRect, 7.f, D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.85f), 1.2f);
+        const D2D1_RECT_F editBox = D2D1::RectF(f.titleRect.left + 6.f, f.titleRect.top, f.titleRect.right - 6.f, f.titleRect.bottom);
+        c.Text(f.editText, editBox, 12.f, t.text, DWRITE_FONT_WEIGHT_SEMI_BOLD, 0);
+        const D2D1_RECT_F caret = c.Caret(f.editText, editBox, 12.f, DWRITE_FONT_WEIGHT_SEMI_BOLD, std::min(f.editCaret, f.editText.size()));
+        const float cx = std::clamp(caret.left, editBox.left, editBox.right);
+        c.Line(cx, f.titleRect.top + 4.f, cx, f.titleRect.bottom - 4.f, t.text, 1.2f);
+    } else {
+        c.Text(f.title, D2D1::RectF(f.lockRect.right + 6.f, 0.f, f.viewRect.left - 6.f, kHeaderH), 12.5f, t.text, DWRITE_FONT_WEIGHT_SEMI_BOLD, 1);
+    }
 
     if (!f.expanded)
         return;
@@ -724,16 +750,40 @@ void DesktopFences::PaintFence(Fence& f, Canvas& c)
     c.Line(kPadX, kHeaderH, w - kPadX, kHeaderH, t.divider);
     const D2D1_RECT_F body = D2D1::RectF(kPadX, kHeaderH + kPadY, w - kPadX, h - kPadY);
     const float bodyW = std::max(kCellW, body.right - body.left);
-    const float bodyH = std::max(kCellH, body.bottom - body.top);
-    const int cols = std::max(1, int(bodyW / kCellW));
+    const float bodyH = std::max(kListRowH, body.bottom - body.top);
+    const int cols = f.listView ? 1 : std::max(1, int(bodyW / kCellW));
     const float colW = bodyW / float(cols);
+    const float rowH = f.listView ? kListRowH : kCellH;
     const int rows = f.items.empty() ? 0 : int((f.items.size() + size_t(cols) - 1) / size_t(cols));
-    f.maxScrollY = std::max(0.f, float(rows) * kCellH - bodyH);
+    f.maxScrollY = std::max(0.f, float(rows) * rowH - bodyH);
     f.scrollY = std::clamp(f.scrollY, 0.f, f.maxScrollY);
 
     c.Clip(body);
     if (f.items.empty()) {
         c.Text(Tr(L"Drag desktop icons or files here"), body, 12.f, t.subtext, DWRITE_FONT_WEIGHT_NORMAL, 1, true);
+    } else if (f.listView) {
+        for (size_t i = 0; i < f.items.size(); ++i) {
+            const float y0 = body.top + float(i) * kListRowH - f.scrollY;
+            if (y0 + kListRowH < body.top || y0 > body.bottom)
+                continue;
+            const D2D1_RECT_F rowRect = D2D1::RectF(body.left, y0 + 1.f, body.right, y0 + kListRowH - 1.f);
+            if (f.draggingItem && int(i) == f.pressItem)
+                c.Fill(rowRect, 8.f, D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.25f));
+            else if (int(i) == f.hoverItem)
+                c.Fill(rowRect, 8.f, t.hover);
+            const float iy = (rowRect.top + rowRect.bottom - kListIconSz) / 2.f;
+            const D2D1_RECT_F ir = D2D1::RectF(rowRect.left + 6.f, iy, rowRect.left + 6.f + kListIconSz, iy + kListIconSz);
+            if (f.items[i].icon && !f.items[i].icon->Empty()) {
+                wchar_t key[64];
+                swprintf_s(key, L"fence|%llu", f.items[i].iconId);
+                c.Image(key, *f.items[i].icon, ir);
+            } else {
+                c.Fill(ir, 5.f, Alpha(t.hover, 1.3f));
+                c.Glyph(f.items[i].isDir ? L"\uE8B7" : L"\uE8A5", ir, 12.f, t.text);
+            }
+            const D2D1_RECT_F tr = D2D1::RectF(ir.right + 8.f, rowRect.top, rowRect.right - 6.f, rowRect.bottom);
+            c.Text(f.items[i].name, tr, 12.f, t.text, DWRITE_FONT_WEIGHT_NORMAL, 0);
+        }
     } else {
         for (size_t i = 0; i < f.items.size(); ++i) {
             const int col = int(i) % cols;
@@ -743,7 +793,9 @@ void DesktopFences::PaintFence(Fence& f, Canvas& c)
             if (y0 + kCellH < body.top || y0 > body.bottom)
                 continue;
             const D2D1_RECT_F cell = D2D1::RectF(x0 + 2.f, y0 + 2.f, x0 + colW - 2.f, y0 + kCellH - 2.f);
-            if (int(i) == f.hoverItem)
+            if (f.draggingItem && int(i) == f.pressItem)
+                c.Fill(cell, 10.f, D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.25f));
+            else if (int(i) == f.hoverItem)
                 c.Fill(cell, 10.f, t.hover);
             const float icx = (cell.left + cell.right) / 2.f;
             const D2D1_RECT_F ir = D2D1::RectF(icx - kIconSz / 2.f, cell.top + 6.f, icx + kIconSz / 2.f, cell.top + 6.f + kIconSz);
@@ -799,13 +851,48 @@ void DesktopFences::HandleDropFiles(Fence& f, const std::vector<std::wstring>& p
     QueueReload(f);
 }
 
+void DesktopFences::BeginRename(Fence& f)
+{
+    f.renaming = true;
+    f.editText = f.title;
+    f.editCaret = f.editText.size();
+    if (f.surface) {
+        SetForegroundWindow(f.surface->Hwnd());
+        SetFocus(f.surface->Hwnd());
+        f.surface->Invalidate();
+    }
+}
+
+void DesktopFences::EndRename(Fence& f, bool commit)
+{
+    if (!f.renaming)
+        return;
+    f.renaming = false;
+    if (commit) {
+        std::wstring next = f.editText;
+        while (!next.empty() && std::iswspace(next.front()))
+            next.erase(next.begin());
+        while (!next.empty() && std::iswspace(next.back()))
+            next.pop_back();
+        if (!next.empty() && next != f.title) {
+            f.title = std::move(next);
+            Save();
+        }
+    }
+    f.editText.clear();
+    if (f.surface)
+        f.surface->Invalidate();
+}
+
 void DesktopFences::MoveItemToDesktop(Fence& f, const Item& item)
 {
     const std::wstring desktop = DesktopFolderPath();
     if (desktop.empty())
         return;
-    if (CopyOrMovePath(item.path, desktop, false))
+    if (CopyOrMovePath(item.path, desktop, false)) {
+        SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW, desktop.c_str(), nullptr);
         QueueReload(f);
+    }
 }
 
 void DesktopFences::ShowFenceMenu(Fence& f, POINT screen, int itemIndex)
@@ -837,6 +924,8 @@ void DesktopFences::ShowFenceMenu(Fence& f, POINT screen, int itemIndex)
     }
     entries = {
         {f.title, 0, false, true, true},
+        {Tr(L"Rename fence"), 18},
+        {Tr(L"List view"), 19, f.listView},
         {Tr(L"Always expanded"), 10, f.alwaysExpanded},
         {Tr(L"Lock position"), 11, f.locked},
         {},
@@ -884,6 +973,14 @@ void DesktopFences::ShowFenceMenu(Fence& f, POINT screen, int itemIndex)
             QueueReload(*target);
         } else if (cmd == 17) {
             RemoveFence(fenceId);
+        } else if (cmd == 18) {
+            BeginRename(*target);
+        } else if (cmd == 19) {
+            target->listView = !target->listView;
+            target->scrollY = 0;
+            if (target->surface)
+                target->surface->Invalidate();
+            Save();
         }
     });
 }
@@ -896,6 +993,10 @@ bool DesktopFences::HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, L
     auto hitItem = [&]() -> int {
         if (!f.expanded || y < kHeaderH + kPadY || y > f.h - kPadY || x < kPadX || x > f.w - kPadX)
             return -1;
+        if (f.listView) {
+            const int row = int((y - (kHeaderH + kPadY) + f.scrollY) / kListRowH);
+            return row >= 0 && size_t(row) < f.items.size() ? row : -1;
+        }
         const float bodyW = std::max(kCellW, f.w - 2 * kPadX);
         const int cols = std::max(1, int(bodyW / kCellW));
         const float colW = bodyW / float(cols);
@@ -907,6 +1008,8 @@ bool DesktopFences::HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, L
     auto hitBtn = [&]() -> std::wstring {
         if (InRect(f.lockRect, x, y))
             return L"lock";
+        if (InRect(f.viewRect, x, y))
+            return L"view";
         if (InRect(f.pinRect, x, y))
             return L"pin";
         if (InRect(f.menuRect, x, y))
@@ -918,7 +1021,7 @@ bool DesktopFences::HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, L
     case WM_TIMER:
         if (wp == kCollapseTimer) {
             KillTimer(f.surface->Hwnd(), kCollapseTimer);
-            if (!f.alwaysExpanded && !f.moving && !f.resizing && !f.dragHighlight && (!menu || !menu->Visible()))
+            if (!f.alwaysExpanded && !f.renaming && !f.moving && !f.resizing && !f.dragHighlight && (!menu || !menu->Visible()))
                 SetExpanded(f, false);
             return true;
         }
@@ -931,6 +1034,18 @@ bool DesktopFences::HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, L
         }
         if (!f.expanded)
             SetExpanded(f, true);
+        if (f.pressItem >= 0 && (wp & MK_LBUTTON)) {
+            const POINT curClient{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            if (!f.draggingItem && (std::abs(curClient.x - f.pressPt.x) > GetSystemMetrics(SM_CXDRAG) ||
+                                    std::abs(curClient.y - f.pressPt.y) > GetSystemMetrics(SM_CYDRAG))) {
+                f.draggingItem = true;
+                f.surface->Invalidate();
+            }
+            if (f.draggingItem) {
+                SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                return true;
+            }
+        }
         if (f.moving || f.resizing) {
             POINT cur{};
             GetCursorPos(&cur);
@@ -963,7 +1078,7 @@ bool DesktopFences::HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, L
         f.hoverBtn.clear();
         f.hoverItem = -1;
         f.surface->Invalidate();
-        if (!f.alwaysExpanded && !f.moving && !f.resizing)
+        if (!f.alwaysExpanded && !f.renaming && !f.moving && !f.resizing && !f.draggingItem)
             SetTimer(f.surface->Hwnd(), kCollapseTimer, kCollapseDelayMs, nullptr);
         return true;
     case WM_MOUSEWHEEL:
@@ -973,11 +1088,85 @@ bool DesktopFences::HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, L
             f.surface->Invalidate();
         }
         return true;
+    case WM_KILLFOCUS:
+        if (f.renaming)
+            EndRename(f, true);
+        return false;
+    case WM_IME_STARTCOMPOSITION:
+        if (f.renaming) {
+            if (HIMC imc = ImmGetContext(f.surface->Hwnd())) {
+                COMPOSITIONFORM cf{};
+                cf.dwStyle = CFS_POINT;
+                cf.ptCurrentPos = POINT{LONG((f.titleRect.left + 8.f) * s), LONG(f.titleRect.bottom * s)};
+                ImmSetCompositionWindow(imc, &cf);
+                ImmReleaseContext(f.surface->Hwnd(), imc);
+            }
+        }
+        return false;
+    case WM_KEYDOWN:
+        if (!f.renaming)
+            return false;
+        if (wp == VK_RETURN) {
+            EndRename(f, true);
+            return true;
+        }
+        if (wp == VK_ESCAPE) {
+            EndRename(f, false);
+            return true;
+        }
+        if (wp == VK_BACK && f.editCaret > 0) {
+            f.editText.erase(f.editCaret - 1, 1);
+            --f.editCaret;
+            f.surface->Invalidate();
+            return true;
+        }
+        if (wp == VK_DELETE && f.editCaret < f.editText.size()) {
+            f.editText.erase(f.editCaret, 1);
+            f.surface->Invalidate();
+            return true;
+        }
+        if (wp == VK_LEFT && f.editCaret > 0) {
+            --f.editCaret;
+            f.surface->Invalidate();
+            return true;
+        }
+        if (wp == VK_RIGHT && f.editCaret < f.editText.size()) {
+            ++f.editCaret;
+            f.surface->Invalidate();
+            return true;
+        }
+        if (wp == VK_HOME) {
+            f.editCaret = 0;
+            f.surface->Invalidate();
+            return true;
+        }
+        if (wp == VK_END) {
+            f.editCaret = f.editText.size();
+            f.surface->Invalidate();
+            return true;
+        }
+        return true;
+    case WM_CHAR:
+        if (!f.renaming)
+            return false;
+        if (wp >= 0x20 && f.editText.size() < 48) {
+            f.editText.insert(f.editCaret, 1, static_cast<wchar_t>(wp));
+            ++f.editCaret;
+            f.surface->Invalidate();
+        }
+        return true;
     case WM_LBUTTONDOWN: {
+        if (f.renaming && !InRect(f.titleRect, x, y))
+            EndRename(f, true);
         const std::wstring btn = hitBtn();
         if (!btn.empty()) {
             if (btn == L"lock") {
                 f.locked = !f.locked;
+                f.surface->Invalidate();
+                Save();
+            } else if (btn == L"view") {
+                f.listView = !f.listView;
+                f.scrollY = 0;
                 f.surface->Invalidate();
                 Save();
             } else if (btn == L"pin") {
@@ -990,6 +1179,17 @@ bool DesktopFences::HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, L
                 ShowFenceMenu(f, cur, -1);
             }
             return true;
+        }
+        if (InRect(f.titleRect, x, y)) {
+            const ULONGLONG now = GetTickCount64();
+            if (!f.renaming && now - f.lastTitleClickMs <= GetDoubleClickTime()) {
+                f.lastTitleClickMs = 0;
+                BeginRename(f);
+                return true;
+            }
+            f.lastTitleClickMs = now;
+            if (f.renaming)
+                return true;
         }
         if (!f.locked && f.expanded && x >= f.w - kGrip && y >= f.h - kGrip) {
             f.resizing = true;
@@ -1012,23 +1212,74 @@ bool DesktopFences::HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, L
             const ULONGLONG now = GetTickCount64();
             if (idx == f.lastClickItem && now - f.lastClickMs <= GetDoubleClickTime()) {
                 f.lastClickItem = -1;
+                f.pressItem = -1;
+                f.draggingItem = false;
                 LaunchFile(f.items[size_t(idx)].path);
             } else {
                 f.lastClickItem = idx;
                 f.lastClickMs = now;
+                f.pressItem = idx;
+                f.pressPt = POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+                f.draggingItem = false;
+                SetCapture(f.surface->Hwnd());
             }
         }
         return true;
     }
-    case WM_LBUTTONUP:
+    case WM_LBUTTONUP: {
+        if (GetCapture() == f.surface->Hwnd())
+            ReleaseCapture();
+        if (f.draggingItem && f.pressItem >= 0 && size_t(f.pressItem) < f.items.size()) {
+            const Item dragged = f.items[size_t(f.pressItem)];
+            const bool copy = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            f.draggingItem = false;
+            f.pressItem = -1;
+            f.surface->Invalidate();
+            POINT cur{};
+            if (GetCursorPos(&cur)) {
+                const RECT selfRect = f.surface->Rect();
+                Fence* targetFence = nullptr;
+                for (const auto& other : fences_) {
+                    if (other.get() != &f && other->surface && other->surface->Visible()) {
+                        const RECT orRect = other->surface->Rect();
+                        if (PtInRect(&orRect, cur)) {
+                            targetFence = other.get();
+                            break;
+                        }
+                    }
+                }
+                if (targetFence) {
+                    if (CopyOrMovePath(dragged.path, targetFence->folder, copy)) {
+                        QueueReload(f);
+                        QueueReload(*targetFence);
+                    }
+                } else if (!PtInRect(&selfRect, cur)) {
+                    const std::wstring desktop = DesktopFolderPath();
+                    if (!desktop.empty() && CopyOrMovePath(dragged.path, desktop, copy)) {
+                        SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW, desktop.c_str(), nullptr);
+                        QueueReload(f);
+                    }
+                }
+            }
+            return true;
+        }
+        f.draggingItem = false;
+        f.pressItem = -1;
         if (f.moving || f.resizing) {
+            const bool resized = f.resizing;
             f.moving = f.resizing = false;
-            if (GetCapture() == f.surface->Hwnd())
-                ReleaseCapture();
+            if (resized && f.surface)
+                f.surface->ReserveResize(D2D1::SizeF(f.w, f.h));
             Save();
         }
         return true;
+    }
     case WM_CAPTURECHANGED:
+        if (f.draggingItem || f.pressItem >= 0) {
+            f.draggingItem = false;
+            f.pressItem = -1;
+            f.surface->Invalidate();
+        }
         if (f.moving || f.resizing) {
             f.moving = f.resizing = false;
             Save();

@@ -240,9 +240,10 @@ void Bar::HandleRightButtonUp(HWND h, POINT pt)
             if (onTrayIconUnpin)
                 onTrayIconUnpin(TrayItemPinKey(key));
         } else if (onTrayIconRightClick) {
-            POINT cur{};
-            GetCursorPos(&cur);
-            onTrayIconRightClick(TrayItemPinKey(key), EntryRect(key), cur);
+            const RECT cell = EntryRect(key);
+            const RECT barRect = BarRect();
+            const POINT anchor{(cell.left + cell.right) / 2, barRect.top - 6};
+            onTrayIconRightClick(TrayItemPinKey(key), cell, anchor);
         }
         return;
     }

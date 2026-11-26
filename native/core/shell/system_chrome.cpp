@@ -619,6 +619,8 @@ void SystemChrome::HideTaskbars()
     for (HWND w : Taskbars())
         if (g_taskbarVisibility.ShouldHide() && IsWindowVisible(w))
             ShowWindowAsync(w, SW_HIDE);
+    if (HWND overflow = FindWindowW(L"NotifyIconOverflowWindow", nullptr); g_taskbarVisibility.ShouldHide() && overflow && IsWindowVisible(overflow))
+        ShowWindowAsync(overflow, SW_HIDE);
     // A concurrent reveal or exit can have restored the taskbar while a
     // cross-thread ShowWindowAsync was in flight. Restoration must win that race.
     if (!g_taskbarVisibility.ShouldHide())

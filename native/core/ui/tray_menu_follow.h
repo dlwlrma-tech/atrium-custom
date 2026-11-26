@@ -8,7 +8,7 @@
 
 namespace atrium {
 
-void FollowTrayMenu(POINT at, const std::wstring& exe);
+void FollowTrayMenu(POINT at, const std::wstring& exe, RECT avoidBar = {});
 void StopTrayMenuFollow();
 
 } // namespace atrium

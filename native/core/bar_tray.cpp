@@ -64,17 +64,27 @@ void TogglePinnedTrayIcon(SettingsServer* server, const std::wstring& pinKey)
 
 void ConfigureBarTray(Bar& bar, TrayModel& model, std::function<SettingsServer*()> getServer)
 {
-    bar.onTrayIconClick = [&model](const std::wstring& pinKey, RECT cell) {
-        if (const auto icon = FindPinnedTrayIcon(model, pinKey))
-            model.Click(*icon, false, cell);
-    };
-    bar.onTrayIconDoubleClick = [&model](const std::wstring& pinKey, RECT cell) {
-        if (const auto icon = FindPinnedTrayIcon(model, pinKey))
-            model.DoubleClick(*icon, true, cell);
-    };
-    bar.onTrayIconRightClick = [&model](const std::wstring& pinKey, RECT cell, POINT cursor) {
+    bar.onTrayIconClick = [&bar, &model](const std::wstring& pinKey, RECT cell) {
         if (const auto icon = FindPinnedTrayIcon(model, pinKey)) {
-            FollowTrayMenu(cursor, icon->exe);
+            const RECT barRect = bar.BarRect();
+            const POINT anchor{(cell.left + cell.right) / 2, barRect.top - 6};
+            model.SetHostPlaces(RECT{cell.left, barRect.top - 24, cell.right, barRect.top - 4});
+            FollowTrayMenu(anchor, icon->exe, barRect);
+            model.Click(*icon, false, cell);
+        }
+    };
+    bar.onTrayIconDoubleClick = [&bar, &model](const std::wstring& pinKey, RECT cell) {
+        if (const auto icon = FindPinnedTrayIcon(model, pinKey)) {
+            const RECT barRect = bar.BarRect();
+            model.SetHostPlaces(RECT{cell.left, barRect.top - 24, cell.right, barRect.top - 4});
+            model.DoubleClick(*icon, true, cell);
+        }
+    };
+    bar.onTrayIconRightClick = [&bar, &model](const std::wstring& pinKey, RECT cell, POINT anchor) {
+        if (const auto icon = FindPinnedTrayIcon(model, pinKey)) {
+            const RECT barRect = bar.BarRect();
+            model.SetHostPlaces(RECT{cell.left, barRect.top - 24, cell.right, barRect.top - 4});
+            FollowTrayMenu(anchor, icon->exe, barRect);
             model.Click(*icon, true, cell);
         }
     };

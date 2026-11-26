@@ -1054,6 +1054,8 @@
     "Change mapped folder…": "更换映射文件夹…",
     "New desktop fence": "新建桌面格子",
     "Map folder to desktop fence…": "映射文件夹为桌面格子…",
-    "Remove this fence": "移除此格子"
+    "Remove this fence": "移除此格子",
+    "Rename fence": "重命名格子",
+    "List view": "列表显示"
   }
 }
