@@ -524,7 +524,7 @@ DesktopFences::Fence& DesktopFences::CreateFence(const std::wstring& id, const s
     f->locked = locked;
     f->alwaysExpanded = alwaysExpanded;
     f->expanded = alwaysExpanded;
-    f->surface = std::make_unique<Surface>(instance_, L"Atrium Fence", true, 12, true);
+    f->surface = std::make_unique<Surface>(instance_, L"Atrium Fence", true, 12.f, true);
     f->surface->SetRadius(radius_);
     Fence* raw = f.get();
     f->surface->paint = [this, raw](Canvas& c) { PaintFence(*raw, c); };
