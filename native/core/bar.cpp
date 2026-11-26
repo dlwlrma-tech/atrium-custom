@@ -1,4 +1,5 @@
 #include "bar.h"
+#include "ui/tray_menu_follow.h"
 #include "bar_drop.h"
 #include "bar_entries.h"
 
@@ -150,6 +151,7 @@ Bar::Bar(HINSTANCE instance, bool debugCapturable, std::wstring display)
 
 Bar::~Bar()
 {
+    StopTrayMenuFollow();
     DetachInput();
     SetEvent(quit_);
     if (render_.joinable())

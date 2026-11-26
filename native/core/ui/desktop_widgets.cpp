@@ -316,6 +316,11 @@ void DesktopWidgets::SetEnabled(bool on)
         KillTimer(host_, kCaretTimer);
         if (KillTimer(host_, kSaveTimer))
             Save(); // typing not saved yet
+        if (gpuQuery_) {
+            PdhCloseQuery(gpuQuery_);
+            gpuQuery_ = nullptr;
+            gpuCounter_ = nullptr;
+        }
         Clear();
         Log(L"widgets: off");
     }

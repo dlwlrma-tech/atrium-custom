@@ -36,13 +36,15 @@ struct MenuFollow {
 } g_follow;
 
 POINT MenuPlace(POINT at, int w, int h, const RECT& avoidBar);
+bool FollowCancelKeyDown();
 
 void CALLBACK FollowExpired(HWND, UINT, UINT_PTR timer, DWORD)
 {
     if (timer != g_follow.timer)
         return;
     if (g_follow.menu) {
-        if (!IsWindow(g_follow.menu) || !IsWindowVisible(g_follow.menu)) {
+        if (!IsWindow(g_follow.menu) || !IsWindowVisible(g_follow.menu) || FollowCancelKeyDown() ||
+            (g_follow.until && GetTickCount64() >= g_follow.until)) {
             StopTrayMenuFollow();
             return;
         }
@@ -206,7 +208,7 @@ void CALLBACK MenuShown(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LO
     g_follow.menu = hwnd;
     g_follow.pid = pid;
     g_follow.placed = p;
-    g_follow.until = 0; // follow while the menu remains visible
+    g_follow.until = GetTickCount64() + 1500; // follow while the menu settles, without locking draggable popups
     if (g_follow.timer)
         KillTimer(nullptr, g_follow.timer);
     g_follow.timer = SetTimer(nullptr, 0, 50, FollowExpired);

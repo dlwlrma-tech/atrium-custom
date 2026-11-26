@@ -607,6 +607,11 @@ DesktopFences::DesktopFences(HINSTANCE instance) : instance_(instance)
 
 DesktopFences::~DesktopFences()
 {
+    if (desktopIconsHidden_) {
+        if (HWND list = FindDesktopListView())
+            ShowWindow(list, SW_SHOWNOACTIVATE);
+        desktopIconsHidden_ = false;
+    }
     KillTimer(host_, kRefreshTimer);
     KillTimer(host_, kRestackTimer);
     KillTimer(host_, kSafetyTimer);
@@ -672,10 +677,19 @@ LRESULT CALLBACK DesktopFences::DesktopMouseProc(int code, WPARAM message, LPARA
             GetWindowThreadProcessId(list, &desktopPid);
             GetWindowThreadProcessId(under, &targetPid);
         }
+        const HWND defView = list ? GetParent(list) : nullptr;
+        const HWND desktopRoot = list ? GetAncestor(list, GA_ROOT) : nullptr;
+        const HWND underRoot = under ? GetAncestor(under, GA_ROOT) : nullptr;
+        bool isDesktopWindow = under && (under == list || under == defView || under == desktopRoot);
+        if (!isDesktopWindow && underRoot && desktopPid && targetPid == desktopPid) {
+            wchar_t rootCls[32]{};
+            GetClassNameW(underRoot, rootCls, 32);
+            isDesktopWindow = wcscmp(rootCls, L"Progman") == 0 || wcscmp(rootCls, L"WorkerW") == 0;
+        }
         POINT client = mouse ? mouse->pt : POINT{};
         RECT clientRect{};
-        const bool overDesktop = list && mouse && ScreenToClient(list, &client) && GetClientRect(list, &clientRect) &&
-                                 PtInRect(&clientRect, client) && under && targetPid == desktopPid && targetPid != GetCurrentProcessId();
+        const bool overDesktop = list && mouse && isDesktopWindow && ScreenToClient(list, &client) && GetClientRect(list, &clientRect) &&
+                                 PtInRect(&clientRect, client) && targetPid != GetCurrentProcessId();
         if (overDesktop) {
             const LPARAM point = MAKELPARAM(WORD(mouse->pt.x), WORD(mouse->pt.y));
             PostMessageW(g_fences->host_, WM_DESKTOP_MOUSE_DOWN, 0, point);
@@ -689,8 +703,9 @@ LRESULT CALLBACK DesktopFences::DesktopMouseProc(int code, WPARAM message, LPARA
 void DesktopFences::OnDesktopMouseDown(POINT screen)
 {
     const HWND list = FindDesktopListView();
+    const bool iconsHidden = desktopIconsHidden_ || (list && !IsWindowVisible(list));
     winrt::com_ptr<IFolderView2> view;
-    const bool blank = desktopIconsHidden_ || (list && GetDesktopFolderView(view) && IsBlankDesktopPoint(view.get(), list, screen));
+    const bool blank = iconsHidden || (list && GetDesktopFolderView(view) && IsBlankDesktopPoint(view.get(), list, screen));
     if (!blank) {
         lastDesktopClickMs_ = 0;
         return;
