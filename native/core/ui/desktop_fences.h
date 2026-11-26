@@ -78,6 +78,12 @@ private:
     void ApplyLoadResult(LoadResult res);
     void PaintFence(Fence& f, Canvas& c);
     bool HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, LRESULT& r);
+    int HitFenceItem(const Fence& f, float x, float y) const;
+    int HitFenceItem(const Fence& f, POINTL screen) const;
+    bool IsApplicationItem(const Item& item) const;
+    bool IsApplicationItemAt(const Fence& f, int itemIndex) const;
+    void LaunchItemWithFiles(Fence& f, int itemIndex, const std::vector<std::wstring>& paths);
+    void SetDropHover(Fence& f, int itemIndex);
     void HandleDropFiles(Fence& f, const std::vector<std::wstring>& paths, bool copy);
     void HandleDragEnter(Fence& f);
     void HandleDragLeave(Fence& f);

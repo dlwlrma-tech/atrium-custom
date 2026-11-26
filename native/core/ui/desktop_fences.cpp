@@ -106,6 +106,14 @@ std::wstring UniqueDestination(const std::wstring& dir, const std::wstring& file
     return base + fileName;
 }
 
+bool IsInsideFolder(const std::wstring& path, const std::wstring& folder)
+{
+    std::wstring prefix = FoldCase(folder);
+    if (!prefix.empty() && prefix.back() != L'\\' && prefix.back() != L'/')
+        prefix += L'\\';
+    return !prefix.empty() && FoldCase(path).starts_with(prefix);
+}
+
 bool CopyOrMovePath(const std::wstring& src, const std::wstring& dstDir, bool copy)
 {
     if (src.empty() || dstDir.empty())
@@ -158,28 +166,142 @@ void RevealInExplorer(const std::wstring& path)
     }
 }
 
+std::wstring QuoteArgument(const std::wstring& value)
+{
+    std::wstring out = L"\"";
+    size_t slashes = 0;
+    for (wchar_t ch : value) {
+        if (ch == L'\\') {
+            ++slashes;
+            continue;
+        }
+        if (ch == L'\"')
+            out.append(slashes * 2 + 1, L'\\');
+        else
+            out.append(slashes, L'\\');
+        out += ch;
+        slashes = 0;
+    }
+    out.append(slashes * 2, L'\\');
+    out += L'\"';
+    return out;
+}
+
+struct FenceDropSource : winrt::implements<FenceDropSource, IDropSource> {
+    HRESULT __stdcall QueryContinueDrag(BOOL escape, DWORD keyState) override
+    {
+        if (escape)
+            return DRAGDROP_S_CANCEL;
+        return (keyState & MK_LBUTTON) ? S_OK : DRAGDROP_S_DROP;
+    }
+    HRESULT __stdcall GiveFeedback(DWORD) override { return DRAGDROP_S_USEDEFAULTCURSORS; }
+};
+
+bool AddFileDropFormat(IDataObject* data, const std::wstring& path)
+{
+    if (!data || path.empty())
+        return false;
+    const SIZE_T bytes = sizeof(DROPFILES) + (path.size() + 2) * sizeof(wchar_t);
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes);
+    if (!memory)
+        return false;
+    auto* drop = static_cast<DROPFILES*>(GlobalLock(memory));
+    if (!drop) {
+        GlobalFree(memory);
+        return false;
+    }
+    drop->pFiles = sizeof(DROPFILES);
+    drop->fWide = TRUE;
+    auto* names = reinterpret_cast<wchar_t*>(reinterpret_cast<BYTE*>(drop) + sizeof(DROPFILES));
+    std::copy(path.begin(), path.end(), names);
+    GlobalUnlock(memory);
+
+    FORMATETC format{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+    STGMEDIUM medium{};
+    medium.tymed = TYMED_HGLOBAL;
+    medium.hGlobal = memory;
+    if (FAILED(data->SetData(&format, &medium, TRUE))) {
+        GlobalFree(memory);
+        return false;
+    }
+    return true;
+}
+
+void BeginShellDrag(HWND owner, const std::wstring& path)
+{
+    PIDLIST_ABSOLUTE item = nullptr;
+    if (FAILED(SHParseDisplayName(path.c_str(), nullptr, &item, 0, nullptr)) || !item)
+        return;
+    PIDLIST_ABSOLUTE parent = ILCloneFull(item);
+    if (!parent) {
+        ILFree(item);
+        return;
+    }
+    ILRemoveLastID(parent);
+    PCUITEMID_CHILD child = ILFindLastID(item);
+    PCUITEMID_CHILD children[] = {child};
+    winrt::com_ptr<IDataObject> data;
+    const HRESULT created = SHCreateDataObject(parent, 1, children, nullptr, __uuidof(IDataObject), data.put_void());
+    ILFree(parent);
+    ILFree(item);
+    if (FAILED(created) || !data || !AddFileDropFormat(data.get(), path))
+        return;
+    auto source = winrt::make<FenceDropSource>();
+    DWORD effect = DROPEFFECT_NONE;
+    SHDoDragDrop(owner, data.get(), source.get(), DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK, &effect);
+}
+
 } // namespace
 
 struct FenceDropTarget : winrt::implements<FenceDropTarget, IDropTarget> {
     DesktopFences* owner;
     std::wstring fenceId;
     bool hasFiles = false;
+    int hoverItem = -1;
 
     FenceDropTarget(DesktopFences* o, std::wstring id) : owner(o), fenceId(std::move(id)) {}
 
-    HRESULT __stdcall DragEnter(IDataObject* data, DWORD keyState, POINTL, DWORD* effect) override
+    DWORD Effect(DesktopFences::Fence& f, DWORD keyState) const
+    {
+        if (hasFiles && owner->IsApplicationItemAt(f, hoverItem))
+            return DROPEFFECT_COPY;
+        return hasFiles ? ((keyState & MK_CONTROL) ? DROPEFFECT_COPY : DROPEFFECT_MOVE) : DROPEFFECT_NONE;
+    }
+
+    void UpdateHover(DesktopFences::Fence& f, POINTL pt)
+    {
+        const int next = hasFiles ? owner->HitFenceItem(f, pt) : -1;
+        if (next != hoverItem) {
+            hoverItem = next;
+            owner->SetDropHover(f, next);
+        }
+    }
+
+    HRESULT __stdcall DragEnter(IDataObject* data, DWORD keyState, POINTL pt, DWORD* effect) override
     {
         FORMATETC fe{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
         hasFiles = data && data->QueryGetData(&fe) == S_OK;
-        *effect = hasFiles ? ((keyState & MK_CONTROL) ? DROPEFFECT_COPY : DROPEFFECT_MOVE) : DROPEFFECT_NONE;
-        if (hasFiles && owner)
-            if (auto* f = owner->FindFence(fenceId))
+        hoverItem = -1;
+        if (hasFiles && owner) {
+            if (auto* f = owner->FindFence(fenceId)) {
                 owner->HandleDragEnter(*f);
+                UpdateHover(*f, pt);
+                *effect = Effect(*f, keyState);
+                return S_OK;
+            }
+        }
+        *effect = DROPEFFECT_NONE;
         return S_OK;
     }
-    HRESULT __stdcall DragOver(DWORD keyState, POINTL, DWORD* effect) override
+    HRESULT __stdcall DragOver(DWORD keyState, POINTL pt, DWORD* effect) override
     {
-        *effect = hasFiles ? ((keyState & MK_CONTROL) ? DROPEFFECT_COPY : DROPEFFECT_MOVE) : DROPEFFECT_NONE;
+        if (owner)
+            if (auto* f = owner->FindFence(fenceId)) {
+                UpdateHover(*f, pt);
+                *effect = Effect(*f, keyState);
+                return S_OK;
+            }
+        *effect = DROPEFFECT_NONE;
         return S_OK;
     }
     HRESULT __stdcall DragLeave() override
@@ -187,15 +309,52 @@ struct FenceDropTarget : winrt::implements<FenceDropTarget, IDropTarget> {
         if (owner)
             if (auto* f = owner->FindFence(fenceId))
                 owner->HandleDragLeave(*f);
+        hoverItem = -1;
         return S_OK;
     }
-    HRESULT __stdcall Drop(IDataObject* data, DWORD keyState, POINTL, DWORD* effect) override
+    HRESULT __stdcall Drop(IDataObject* data, DWORD keyState, POINTL pt, DWORD* effect) override
     {
         const bool copy = (keyState & MK_CONTROL) != 0;
-        *effect = hasFiles ? (copy ? DROPEFFECT_COPY : DROPEFFECT_MOVE) : DROPEFFECT_NONE;
-        if (owner)
-            if (auto* f = owner->FindFence(fenceId))
+        *effect = DROPEFFECT_NONE;
+        if (owner) {
+            if (auto* f = owner->FindFence(fenceId)) {
+                UpdateHover(*f, pt);
+                const int targetItem = hoverItem;
+                if (owner->IsApplicationItemAt(*f, targetItem)) {
+                    *effect = DROPEFFECT_COPY;
+                    if (hasFiles && data) {
+                        FORMATETC fileEtc{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+                        STGMEDIUM fileMedium{};
+                        if (SUCCEEDED(data->GetData(&fileEtc, &fileMedium))) {
+                            std::vector<std::wstring> files;
+                            if (auto* fileDrop = static_cast<HDROP>(GlobalLock(fileMedium.hGlobal))) {
+                                const UINT count = DragQueryFileW(fileDrop, 0xFFFFFFFF, nullptr, 0);
+                                for (UINT i = 0; i < count && i < 128; ++i) {
+                                    const UINT len = DragQueryFileW(fileDrop, i, nullptr, 0);
+                                    if (!len)
+                                        continue;
+                                    std::wstring path(len + 1, L'\0');
+                                    const UINT copied = DragQueryFileW(fileDrop, i, path.data(), UINT(path.size()));
+                                    if (copied) {
+                                        path.resize(copied);
+                                        files.push_back(std::move(path));
+                                    }
+                                }
+                                GlobalUnlock(fileMedium.hGlobal);
+                            }
+                            ReleaseStgMedium(&fileMedium);
+                            if (!files.empty())
+                                owner->LaunchItemWithFiles(*f, targetItem, files);
+                        }
+                    }
+                    owner->HandleDragLeave(*f);
+                    hasFiles = false;
+                    hoverItem = -1;
+                    return S_OK;
+                }
                 owner->HandleDragLeave(*f);
+            }
+        }
         if (!hasFiles || !data || !owner)
             return S_OK;
         FORMATETC fe{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
@@ -218,9 +377,14 @@ struct FenceDropTarget : winrt::implements<FenceDropTarget, IDropTarget> {
             GlobalUnlock(sm.hGlobal);
         }
         ReleaseStgMedium(&sm);
-        if (!paths.empty())
-            if (auto* f = owner->FindFence(fenceId))
+        if (!paths.empty()) {
+            if (auto* f = owner->FindFence(fenceId)) {
+                *effect = copy ? DROPEFFECT_COPY : DROPEFFECT_MOVE;
                 owner->HandleDropFiles(*f, paths, copy);
+            }
+        }
+        hasFiles = false;
+        hoverItem = -1;
         return S_OK;
     }
 };
@@ -244,6 +408,7 @@ struct DesktopFences::Fence {
     bool resizing = false;
     bool draggingItem = false;
     int pressItem = -1;
+    int dropHoverItem = -1;
     POINT pressPt{};
     POINT dragStartScreen{};
     float dragStartX = 0, dragStartY = 0, dragStartW = 0, dragStartH = 0;
@@ -259,6 +424,71 @@ struct DesktopFences::Fence {
     winrt::com_ptr<IDropTarget> dropTarget;
     D2D1_RECT_F lockRect{}, viewRect{}, pinRect{}, menuRect{}, titleRect{};
 };
+
+int DesktopFences::HitFenceItem(const Fence& f, float x, float y) const
+{
+    if (!f.expanded || y < kHeaderH + kPadY || y > f.h - kPadY || x < kPadX || x > f.w - kPadX)
+        return -1;
+    if (f.listView) {
+        const int row = int((y - (kHeaderH + kPadY) + f.scrollY) / kListRowH);
+        return row >= 0 && size_t(row) < f.items.size() ? row : -1;
+    }
+    const float bodyW = std::max(kCellW, f.w - 2 * kPadX);
+    const int cols = std::max(1, int(bodyW / kCellW));
+    const float colW = bodyW / float(cols);
+    const int col = std::clamp(int((x - kPadX) / colW), 0, cols - 1);
+    const int row = int((y - (kHeaderH + kPadY) + f.scrollY) / kCellH);
+    const int index = row * cols + col;
+    return index >= 0 && size_t(index) < f.items.size() ? index : -1;
+}
+
+int DesktopFences::HitFenceItem(const Fence& f, POINTL screen) const
+{
+    if (!f.surface)
+        return -1;
+    const POINT content = f.surface->ScreenToContent(POINT{screen.x, screen.y});
+    const float scale = f.surface->Scale();
+    return HitFenceItem(f, float(content.x) / scale, float(content.y) / scale);
+}
+
+bool DesktopFences::IsApplicationItem(const Item& item) const
+{
+    if (item.isDir)
+        return false;
+    const wchar_t* ext = PathFindExtensionW(item.path.c_str());
+    return ext && (_wcsicmp(ext, L".lnk") == 0 || _wcsicmp(ext, L".exe") == 0 || _wcsicmp(ext, L".com") == 0 ||
+                   _wcsicmp(ext, L".appref-ms") == 0);
+}
+
+bool DesktopFences::IsApplicationItemAt(const Fence& f, int itemIndex) const
+{
+    return itemIndex >= 0 && size_t(itemIndex) < f.items.size() && IsApplicationItem(f.items[size_t(itemIndex)]);
+}
+
+void DesktopFences::LaunchItemWithFiles(Fence& f, int itemIndex, const std::vector<std::wstring>& paths)
+{
+    if (!IsApplicationItemAt(f, itemIndex) || paths.empty())
+        return;
+    std::wstring args;
+    for (const std::wstring& path : paths) {
+        if (!args.empty())
+            args += L' ';
+        args += QuoteArgument(path);
+    }
+    const Item& app = f.items[size_t(itemIndex)];
+    const HINSTANCE result = ShellExecuteW(nullptr, L"open", app.path.c_str(), args.c_str(), nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(result) <= 32)
+        Log(L"fence: could not open dropped files with '%s' (%ld)", app.path.c_str(), long(reinterpret_cast<INT_PTR>(result)));
+}
+
+void DesktopFences::SetDropHover(Fence& f, int itemIndex)
+{
+    if (f.dropHoverItem == itemIndex)
+        return;
+    f.dropHoverItem = itemIndex;
+    if (f.surface)
+        f.surface->Invalidate();
+}
 
 DesktopFences::DesktopFences(HINSTANCE instance) : instance_(instance)
 {
@@ -767,7 +997,7 @@ void DesktopFences::PaintFence(Fence& f, Canvas& c)
             if (y0 + kListRowH < body.top || y0 > body.bottom)
                 continue;
             const D2D1_RECT_F rowRect = D2D1::RectF(body.left, y0 + 1.f, body.right, y0 + kListRowH - 1.f);
-            if (f.draggingItem && int(i) == f.pressItem)
+            if ((f.draggingItem && int(i) == f.pressItem) || int(i) == f.dropHoverItem)
                 c.Fill(rowRect, 8.f, D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.25f));
             else if (int(i) == f.hoverItem)
                 c.Fill(rowRect, 8.f, t.hover);
@@ -793,7 +1023,7 @@ void DesktopFences::PaintFence(Fence& f, Canvas& c)
             if (y0 + kCellH < body.top || y0 > body.bottom)
                 continue;
             const D2D1_RECT_F cell = D2D1::RectF(x0 + 2.f, y0 + 2.f, x0 + colW - 2.f, y0 + kCellH - 2.f);
-            if (f.draggingItem && int(i) == f.pressItem)
+            if ((f.draggingItem && int(i) == f.pressItem) || int(i) == f.dropHoverItem)
                 c.Fill(cell, 10.f, D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.25f));
             else if (int(i) == f.hoverItem)
                 c.Fill(cell, 10.f, t.hover);
@@ -824,6 +1054,7 @@ void DesktopFences::HandleDragEnter(Fence& f)
 {
     KillTimer(f.surface->Hwnd(), kCollapseTimer);
     f.dragHighlight = true;
+    f.dropHoverItem = -1;
     if (!f.expanded)
         SetExpanded(f, true);
     else if (f.surface)
@@ -833,6 +1064,7 @@ void DesktopFences::HandleDragEnter(Fence& f)
 void DesktopFences::HandleDragLeave(Fence& f)
 {
     f.dragHighlight = false;
+    f.dropHoverItem = -1;
     if (f.surface)
         f.surface->Invalidate();
     if (!f.alwaysExpanded && f.surface)
@@ -844,6 +1076,8 @@ void DesktopFences::HandleDropFiles(Fence& f, const std::vector<std::wstring>& p
     SHCreateDirectoryExW(nullptr, f.folder.c_str(), nullptr);
     int moved = 0;
     for (const std::wstring& path : paths) {
+        if (IsInsideFolder(path, f.folder))
+            continue;
         if (CopyOrMovePath(path, f.folder, copy))
             ++moved;
     }
@@ -990,21 +1224,7 @@ bool DesktopFences::HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, L
     const float s = f.surface->Scale();
     const float x = float(GET_X_LPARAM(lp)) / s;
     const float y = float(GET_Y_LPARAM(lp)) / s;
-    auto hitItem = [&]() -> int {
-        if (!f.expanded || y < kHeaderH + kPadY || y > f.h - kPadY || x < kPadX || x > f.w - kPadX)
-            return -1;
-        if (f.listView) {
-            const int row = int((y - (kHeaderH + kPadY) + f.scrollY) / kListRowH);
-            return row >= 0 && size_t(row) < f.items.size() ? row : -1;
-        }
-        const float bodyW = std::max(kCellW, f.w - 2 * kPadX);
-        const int cols = std::max(1, int(bodyW / kCellW));
-        const float colW = bodyW / float(cols);
-        const int col = std::clamp(int((x - kPadX) / colW), 0, cols - 1);
-        const int row = int((y - (kHeaderH + kPadY) + f.scrollY) / kCellH);
-        const int idx = row * cols + col;
-        return idx >= 0 && size_t(idx) < f.items.size() ? idx : -1;
-    };
+    auto hitItem = [&]() { return HitFenceItem(f, x, y); };
     auto hitBtn = [&]() -> std::wstring {
         if (InRect(f.lockRect, x, y))
             return L"lock";
@@ -1038,11 +1258,15 @@ bool DesktopFences::HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, L
             const POINT curClient{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             if (!f.draggingItem && (std::abs(curClient.x - f.pressPt.x) > GetSystemMetrics(SM_CXDRAG) ||
                                     std::abs(curClient.y - f.pressPt.y) > GetSystemMetrics(SM_CYDRAG))) {
-                f.draggingItem = true;
+                const Item dragged = f.items[size_t(f.pressItem)];
+                f.draggingItem = false;
+                f.pressItem = -1;
+                f.lastClickItem = -1;
+                if (GetCapture() == f.surface->Hwnd())
+                    ReleaseCapture();
                 f.surface->Invalidate();
-            }
-            if (f.draggingItem) {
-                SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                BeginShellDrag(f.surface->Hwnd(), dragged.path);
+                f.surface->Invalidate();
                 return true;
             }
         }
@@ -1229,40 +1453,6 @@ bool DesktopFences::HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, L
     case WM_LBUTTONUP: {
         if (GetCapture() == f.surface->Hwnd())
             ReleaseCapture();
-        if (f.draggingItem && f.pressItem >= 0 && size_t(f.pressItem) < f.items.size()) {
-            const Item dragged = f.items[size_t(f.pressItem)];
-            const bool copy = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-            f.draggingItem = false;
-            f.pressItem = -1;
-            f.surface->Invalidate();
-            POINT cur{};
-            if (GetCursorPos(&cur)) {
-                const RECT selfRect = f.surface->Rect();
-                Fence* targetFence = nullptr;
-                for (const auto& other : fences_) {
-                    if (other.get() != &f && other->surface && other->surface->Visible()) {
-                        const RECT orRect = other->surface->Rect();
-                        if (PtInRect(&orRect, cur)) {
-                            targetFence = other.get();
-                            break;
-                        }
-                    }
-                }
-                if (targetFence) {
-                    if (CopyOrMovePath(dragged.path, targetFence->folder, copy)) {
-                        QueueReload(f);
-                        QueueReload(*targetFence);
-                    }
-                } else if (!PtInRect(&selfRect, cur)) {
-                    const std::wstring desktop = DesktopFolderPath();
-                    if (!desktop.empty() && CopyOrMovePath(dragged.path, desktop, copy)) {
-                        SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW, desktop.c_str(), nullptr);
-                        QueueReload(f);
-                    }
-                }
-            }
-            return true;
-        }
         f.draggingItem = false;
         f.pressItem = -1;
         if (f.moving || f.resizing) {
