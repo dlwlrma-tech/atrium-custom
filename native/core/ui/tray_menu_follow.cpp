@@ -155,13 +155,9 @@ void CALLBACK MenuShown(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LO
     if (w < 40 || h < 20 || w > (mi.rcWork.right - mi.rcWork.left) * 3 / 5 || h > (mi.rcWork.bottom - mi.rcWork.top) * 19 / 20)
         return; // a mark, a balloon, a window: not a menu
     const POINT at = g_follow.at;
-    RECT barOverlap{};
-    const bool hitsBar = !IsRectEmpty(&g_follow.avoidBar) && IntersectRect(&barOverlap, &r, &g_follow.avoidBar) != FALSE;
-    if (!hitsBar && !tray::ShouldMoveFollowedMenu(r, at, mi.rcMonitor, mi.rcWork, nativeMenu)) {
-        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        StopTrayMenuFollow();
-        return; // the app put it by the pointer itself and it fits
-    }
+    // Tray apps can place a menu just below our bar and still consider it
+    // close enough to the pointer. Always use our placement, which reserves
+    // the space on the inner side of the bar (above it for a bottom bar).
     const POINT p = MenuPlace(at, w, h, g_follow.avoidBar);
     if (!SetWindowPos(hwnd, HWND_TOPMOST, p.x, p.y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE)) {
         Log(L"tray: %s's menu (%s) at %ld,%ld could not be moved (%lu)", name, cls, r.left, r.top, GetLastError());
