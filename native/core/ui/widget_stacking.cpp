@@ -33,6 +33,14 @@ bool IsAppOnMonitor(const StackWindow& w, const RECT& monitorRect)
     return RectsIntersect(w.rect, monitorRect, ow, oh) && (w.hasCaption || (ow >= 64 && oh >= 64) || w.hasTitle || w.appWindow);
 }
 
+bool IsBelowInZOrder(HWND upper, HWND lower)
+{
+    for (HWND at = upper; at; at = GetWindow(at, GW_HWNDNEXT))
+        if (at == lower)
+            return true;
+    return false;
+}
+
 } // namespace
 
 WidgetStackPlan ComputeWidgetStackPlan(const std::vector<StackWindow>& windows, const RECT& monitorRect, HWND fgRoot, bool fgIsOurs, bool wasShowDesktop)
@@ -59,7 +67,8 @@ WidgetStackPlan ComputeWidgetStackPlan(const std::vector<StackWindow>& windows, 
             lowestIdx = i;
         }
     }
-    plan.showDesktop = plan.desktopHost && plan.lowestApp && desktopIdx < lowestIdx && (fgIsHost || (wasShowDesktop && fgIsOurs));
+    const bool desktopIsFront = plan.desktopHost && (!plan.lowestApp || desktopIdx < lowestIdx);
+    plan.showDesktop = desktopIsFront && (fgIsHost || (wasShowDesktop && fgIsOurs));
     if (plan.showDesktop || (!plan.lowestApp && plan.desktopHost))
         plan.after = above ? above : HWND_TOP;
     else
@@ -112,12 +121,43 @@ std::vector<StackWindow> CollectStackSnapshot(const std::vector<HWND>& widgetHwn
 void ApplyWidgetZOrder(const std::vector<HWND>& widgetHwnds, const WidgetStackPlan& plan, DWORD& swpErr)
 {
     const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+    if (plan.showDesktop)
+        for (HWND hw : widgetHwnds)
+            if (!IsWindowVisible(hw) || IsIconic(hw))
+                ShowWindow(hw, SW_SHOWNOACTIVATE);
     for (HWND hw : widgetHwnds)
         if (GetWindowLongPtrW(hw, GWL_EXSTYLE) & WS_EX_TOPMOST)
             SetWindowPos(hw, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+    if (plan.desktopHost && !widgetHwnds.empty()) {
+        const bool alreadyInLayer = std::ranges::all_of(widgetHwnds, [&](HWND hw) {
+            return (plan.after == HWND_TOP || IsBelowInZOrder(plan.after, hw)) && IsBelowInZOrder(hw, plan.desktopHost);
+        });
+        if (alreadyInLayer)
+            return;
+    }
+    if (plan.after == HWND_BOTTOM && !widgetHwnds.empty()) {
+        bool blockAtBottom = true;
+        for (size_t i = 0; i < widgetHwnds.size(); ++i) {
+            const HWND expectedBelow = i + 1 < widgetHwnds.size() ? widgetHwnds[i + 1] : nullptr;
+            if (GetWindow(widgetHwnds[i], GW_HWNDNEXT) != expectedBelow) {
+                blockAtBottom = false;
+                break;
+            }
+        }
+        if (blockAtBottom)
+            return;
+    }
     HWND after = plan.after;
     for (HWND hw : widgetHwnds) {
-        if (SetWindowPos(hw, after, 0, 0, 0, 0, flags)) {
+        bool alreadyPlaced = false;
+        if (after == HWND_TOP) {
+            HWND firstNormal = GetTopWindow(nullptr);
+            while (firstNormal && (GetWindowLongPtrW(firstNormal, GWL_EXSTYLE) & WS_EX_TOPMOST))
+                firstNormal = GetWindow(firstNormal, GW_HWNDNEXT);
+            alreadyPlaced = firstNormal == hw;
+        } else if (after && after != HWND_BOTTOM)
+            alreadyPlaced = GetWindow(after, GW_HWNDNEXT) == hw;
+        if (alreadyPlaced || SetWindowPos(hw, after, 0, 0, 0, 0, flags)) {
             after = hw;
             continue;
         }

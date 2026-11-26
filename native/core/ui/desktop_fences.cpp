@@ -97,15 +97,7 @@ HWND FindDesktopListView()
     return search.list;
 }
 
-bool IsWindowInside(HWND child, HWND parent)
-{
-    for (HWND at = child; at; at = GetParent(at))
-        if (at == parent)
-            return true;
-    return false;
-}
-
-bool GetDesktopFolderView(winrt::com_ptr<IFolderView2>& folderView, winrt::com_ptr<IFolderViewOptions>& viewOptions)
+bool GetDesktopFolderView(winrt::com_ptr<IFolderView2>& folderView)
 {
     winrt::com_ptr<IShellWindows> windows;
     if (FAILED(CoCreateInstance(CLSID_ShellWindows, nullptr, CLSCTX_LOCAL_SERVER, IID_PPV_ARGS(windows.put()))) || !windows)
@@ -127,8 +119,7 @@ bool GetDesktopFolderView(winrt::com_ptr<IFolderView2>& folderView, winrt::com_p
     if (FAILED(shellBrowser->QueryActiveShellView(shellView.put())) || !shellView)
         return false;
     folderView = shellView.try_as<IFolderView2>();
-    viewOptions = shellView.try_as<IFolderViewOptions>();
-    return bool(folderView) && bool(viewOptions);
+    return bool(folderView);
 }
 
 bool IsBlankDesktopPoint(IFolderView2* view, HWND list, POINT screen)
@@ -676,7 +667,16 @@ LRESULT CALLBACK DesktopFences::DesktopMouseProc(int code, WPARAM message, LPARA
         const auto* mouse = reinterpret_cast<const MSLLHOOKSTRUCT*>(data);
         const HWND list = FindDesktopListView();
         const HWND under = mouse ? WindowFromPoint(mouse->pt) : nullptr;
-        if (list && under && IsWindowInside(under, list)) {
+        DWORD desktopPid = 0, targetPid = 0;
+        if (list && under) {
+            GetWindowThreadProcessId(list, &desktopPid);
+            GetWindowThreadProcessId(under, &targetPid);
+        }
+        POINT client = mouse ? mouse->pt : POINT{};
+        RECT clientRect{};
+        const bool overDesktop = list && mouse && ScreenToClient(list, &client) && GetClientRect(list, &clientRect) &&
+                                 PtInRect(&clientRect, client) && under && targetPid == desktopPid && targetPid != GetCurrentProcessId();
+        if (overDesktop) {
             const LPARAM point = MAKELPARAM(WORD(mouse->pt.x), WORD(mouse->pt.y));
             PostMessageW(g_fences->host_, WM_DESKTOP_MOUSE_DOWN, 0, point);
         } else {
@@ -690,8 +690,7 @@ void DesktopFences::OnDesktopMouseDown(POINT screen)
 {
     const HWND list = FindDesktopListView();
     winrt::com_ptr<IFolderView2> view;
-    winrt::com_ptr<IFolderViewOptions> options;
-    if (!list || !GetDesktopFolderView(view, options) || !IsBlankDesktopPoint(view.get(), list, screen)) {
+    if (!list || !GetDesktopFolderView(view) || !IsBlankDesktopPoint(view.get(), list, screen)) {
         lastDesktopClickMs_ = 0;
         return;
     }
@@ -712,19 +711,14 @@ void DesktopFences::OnDesktopMouseDown(POINT screen)
 void DesktopFences::ToggleDesktopIcons()
 {
     winrt::com_ptr<IFolderView2> view;
-    winrt::com_ptr<IFolderViewOptions> options;
-    if (!GetDesktopFolderView(view, options))
+    if (!GetDesktopFolderView(view))
         return;
     DWORD flags = 0;
-    FOLDERVIEWOPTIONS viewFlags = FVO_DEFAULT;
     constexpr DWORD hiddenMask = FWF_NOICONS | FWF_HIDEFILENAMES;
-    if (FAILED(view->GetCurrentFolderFlags(&flags)) || !(flags & FWF_DESKTOP) || FAILED(options->GetFolderViewOptions(&viewFlags)))
-        return;
-    if (FAILED(options->SetFolderViewOptions(FVO_CUSTOMPOSITION, FOLDERVIEWOPTIONS(viewFlags | FVO_CUSTOMPOSITION))))
+    if (FAILED(view->GetCurrentFolderFlags(&flags)) || !(flags & FWF_DESKTOP))
         return;
     const DWORD nextFlags = (flags & hiddenMask) ? (flags & ~hiddenMask) : (flags | hiddenMask);
     const HRESULT changed = view->SetCurrentFolderFlags(hiddenMask, nextFlags);
-    options->SetFolderViewOptions(FVO_CUSTOMPOSITION, viewFlags);
     if (FAILED(changed))
         Log(L"desktop icons: could not toggle visibility (0x%08X)", unsigned(changed));
 }
