@@ -640,7 +640,6 @@ DesktopFences::DesktopFences(HINSTANCE instance) : instance_(instance)
 
 DesktopFences::~DesktopFences()
 {
-    RestoreAllParkedIcons();
     if (desktopIconsHidden_) {
         if (HWND list = FindDesktopListView())
             ShowWindow(list, SW_SHOWNOACTIVATE);
@@ -685,7 +684,6 @@ LRESULT CALLBACK DesktopFences::HostProc(HWND h, UINT m, WPARAM w, LPARAM l)
             for (const auto& f : g_fences->fences_)
                 if (f->surface && f->surface->Visible())
                     g_fences->QueueReload(*f);
-            g_fences->SyncVirtualDesktopIcons();
             return 0;
         }
         if (m == WM_TIMER && w == kRestackTimer) {
@@ -967,7 +965,6 @@ void DesktopFences::Load()
             QueueReload(loaded, true);
         }
     }
-    SyncVirtualDesktopIcons();
 }
 
 void DesktopFences::Save() const
@@ -1052,17 +1049,12 @@ void DesktopFences::RemoveFence(const std::wstring& id)
     for (auto it = fences_.begin(); it != fences_.end(); ++it) {
         if ((*it)->id != id)
             continue;
-        std::vector<std::wstring> toRestore;
-        if ((*it)->virtualDesktop)
-            toRestore = (*it)->pinnedPaths;
         if ((*it)->surface) {
             if ((*it)->dropTarget)
                 RevokeDragDrop((*it)->surface->Hwnd());
             (*it)->surface->Hide(false);
         }
         fences_.erase(it);
-        for (const auto& p : toRestore)
-            RestoreDesktopIcon(p);
         Save();
         return;
     }
@@ -1392,109 +1384,6 @@ void DesktopFences::HandleDragLeave(Fence& f)
         SetTimer(f.surface->Hwnd(), kCollapseTimer, kCollapseDelayMs, nullptr);
 }
 
-void DesktopFences::ParkDesktopIcon(const std::wstring& path)
-{
-    if (path.empty())
-        return;
-    winrt::com_ptr<IFolderView2> view;
-    if (!GetDesktopFolderView(view))
-        return;
-    winrt::com_ptr<IShellFolder> folder;
-    if (FAILED(view->GetFolder(IID_PPV_ARGS(folder.put()))) || !folder)
-        if (FAILED(SHGetDesktopFolder(folder.put())) || !folder)
-            return;
-    int count = 0;
-    if (FAILED(view->ItemCount(SVGIO_ALLVIEW, &count)))
-        return;
-    const std::wstring target = FoldCase(path);
-    for (int i = 0; i < count; ++i) {
-        PITEMID_CHILD pidl = nullptr;
-        if (FAILED(view->Item(i, &pidl)) || !pidl)
-            continue;
-        STRRET sr{};
-        PWSTR raw = nullptr;
-        bool matched = false;
-        if (SUCCEEDED(folder->GetDisplayNameOf(pidl, SHGDN_FORPARSING, &sr)) && SUCCEEDED(StrRetToStrW(&sr, pidl, &raw)) && raw) {
-            matched = FoldCase(raw) == target;
-            CoTaskMemFree(raw);
-        }
-        if (matched) {
-            POINT cur{};
-            if (SUCCEEDED(view->GetItemPosition(pidl, &cur)) && cur.x > -20000 && cur.y > -20000)
-                savedIconPositions_.try_emplace(target, cur);
-            POINT off{-30000, -30000};
-            LPCITEMIDLIST arr[1] = {pidl};
-            view->SelectAndPositionItems(1, arr, &off, SVSI_POSITIONITEM);
-            CoTaskMemFree(pidl);
-            return;
-        }
-        CoTaskMemFree(pidl);
-    }
-}
-
-void DesktopFences::RestoreDesktopIcon(const std::wstring& path, const POINT* preferredScreen)
-{
-    if (path.empty())
-        return;
-    winrt::com_ptr<IFolderView2> view;
-    if (!GetDesktopFolderView(view))
-        return;
-    winrt::com_ptr<IShellFolder> folder;
-    if (FAILED(view->GetFolder(IID_PPV_ARGS(folder.put()))) || !folder)
-        if (FAILED(SHGetDesktopFolder(folder.put())) || !folder)
-            return;
-    int count = 0;
-    if (FAILED(view->ItemCount(SVGIO_ALLVIEW, &count)))
-        return;
-    const std::wstring target = FoldCase(path);
-    POINT restorePt{80, 80};
-    if (preferredScreen) {
-        restorePt = *preferredScreen;
-        if (HWND list = FindDesktopListView())
-            ScreenToClient(list, &restorePt);
-    } else if (auto it = savedIconPositions_.find(target); it != savedIconPositions_.end() && it->second.x > -20000 && it->second.y > -20000) {
-        restorePt = it->second;
-    }
-    for (int i = 0; i < count; ++i) {
-        PITEMID_CHILD pidl = nullptr;
-        if (FAILED(view->Item(i, &pidl)) || !pidl)
-            continue;
-        STRRET sr{};
-        PWSTR raw = nullptr;
-        bool matched = false;
-        if (SUCCEEDED(folder->GetDisplayNameOf(pidl, SHGDN_FORPARSING, &sr)) && SUCCEEDED(StrRetToStrW(&sr, pidl, &raw)) && raw) {
-            matched = FoldCase(raw) == target;
-            CoTaskMemFree(raw);
-        }
-        if (matched) {
-            LPCITEMIDLIST arr[1] = {pidl};
-            view->SelectAndPositionItems(1, arr, &restorePt, SVSI_POSITIONITEM);
-            CoTaskMemFree(pidl);
-            savedIconPositions_.erase(target);
-            return;
-        }
-        CoTaskMemFree(pidl);
-    }
-    savedIconPositions_.erase(target);
-}
-
-void DesktopFences::SyncVirtualDesktopIcons()
-{
-    for (const auto& f : fences_)
-        if (f->virtualDesktop)
-            for (const auto& p : f->pinnedPaths)
-                ParkDesktopIcon(p);
-}
-
-void DesktopFences::RestoreAllParkedIcons()
-{
-    for (const auto& f : fences_)
-        if (f->virtualDesktop)
-            for (const auto& p : f->pinnedPaths)
-                RestoreDesktopIcon(p);
-    savedIconPositions_.clear();
-}
-
 void DesktopFences::HandleDropFiles(Fence& f, const std::vector<std::wstring>& paths, bool copy)
 {
     if (f.virtualDesktop) {
@@ -1524,7 +1413,6 @@ void DesktopFences::HandleDropFiles(Fence& f, const std::vector<std::wstring>& p
                 f.pinnedPaths.push_back(targetPath);
                 changed = true;
             }
-            ParkDesktopIcon(targetPath);
         }
         if (changed)
             Save();
@@ -1584,7 +1472,6 @@ void DesktopFences::MoveItemToDesktop(Fence& f, const Item& item)
         std::erase_if(f.pinnedPaths, [&](const std::wstring& p) { return FoldCase(p) == folded; });
         if (f.pinnedPaths.size() != before)
             Save();
-        RestoreDesktopIcon(item.path);
         QueueReload(f, true);
         return;
     }
@@ -1748,8 +1635,8 @@ bool DesktopFences::HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, L
                     bool insideAnyFence = false;
                     for (const auto& other : fences_) {
                         if (other->surface && other->surface->Visible()) {
-                            const RECT r = other->surface->Rect();
-                            if (PtInRect(&r, dropPt)) {
+                            const RECT fenceRect = other->surface->Rect();
+                            if (PtInRect(&fenceRect, dropPt)) {
                                 insideAnyFence = true;
                                 break;
                             }
@@ -1762,8 +1649,6 @@ bool DesktopFences::HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, L
                         std::erase_if(f.pinnedPaths, [&](const std::wstring& p) { return FoldCase(p) == folded; });
                         if (f.pinnedPaths.size() != before)
                             Save();
-                        if (!fileGone && !insideAnyFence && !(effect & DROPEFFECT_MOVE))
-                            RestoreDesktopIcon(dragged.path, &dropPt);
                         f.loadSignature = 0;
                         QueueReload(f, true);
                     }

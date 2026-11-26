@@ -15,7 +15,6 @@
 #include <mutex>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 namespace atrium {
@@ -101,10 +100,6 @@ private:
     void ShowFenceMenu(Fence& f, POINT screen, int itemIndex);
     std::wstring PickFolderDialog(const std::wstring& initial) const;
     void MoveItemToDesktop(Fence& f, const Item& item);
-    void ParkDesktopIcon(const std::wstring& path);
-    void RestoreDesktopIcon(const std::wstring& path, const POINT* preferredScreen = nullptr);
-    void SyncVirtualDesktopIcons();
-    void RestoreAllParkedIcons();
     void BeginRename(Fence& f);
     void EndRename(Fence& f, bool commit);
 
@@ -126,7 +121,6 @@ private:
     uint64_t nextGen_ = 1;
     ULONGLONG lastDesktopClickMs_ = 0;
     POINT lastDesktopClick_{};
-    std::unordered_map<std::wstring, POINT> savedIconPositions_;
     std::vector<std::unique_ptr<Fence>> fences_;
 
     std::mutex mutex_;
