@@ -1,0 +1,170 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 3 * * 1' # the whole tree, every unit, once a week
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  package:
+    # Visual Studio 2022 (MSVC 14.4x), as the developers': windows-latest moved to Visual Studio 18, whose
+    # standard library refuses clang-tidy 19. A newer toolchain is an upgrade of its own (LLVM 20, the baseline).
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+      - name: Cache LLVM 19 tools
+        id: llvm-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ runner.tool_cache }}/llvm-19.1.0-19.1.5
+          key: llvm-19.1.0-19.1.5-win-x64
+      # Visual Studio's LLVM is 19, the runner's newer: the same clang-tidy and clang-format as the developers'.
+      - name: Pin clang-tidy and clang-format to 19
+        shell: pwsh
+        env:
+          LLVM_DIR: ${{ runner.tool_cache }}/llvm-19.1.0-19.1.5
+          LLVM_CACHE_HIT: ${{ steps.llvm-cache.outputs.cache-hit }}
+        run: |
+          function Find-LlvmExes([string]$dir) {
+            if (-not (Test-Path -LiteralPath $dir)) { return @() }
+            @(Get-ChildItem $dir -Recurse -Include clang-tidy.exe, clang-format.exe |
+                Where-Object FullName -Match '\\data\\')
+          }
+          $exes = Find-LlvmExes $env:LLVM_DIR
+          $hasTidy = [bool]($exes | Where-Object Name -eq 'clang-tidy.exe')
+          $hasFormat = [bool]($exes | Where-Object Name -eq 'clang-format.exe')
+          if ($env:LLVM_CACHE_HIT -ne 'true' -or -not ($hasTidy -and $hasFormat)) {
+            if (Test-Path -LiteralPath $env:LLVM_DIR) { Remove-Item -LiteralPath $env:LLVM_DIR -Recurse -Force }
+            python -m pip install --quiet --only-binary=:all: --target "$env:LLVM_DIR" clang-tidy==19.1.0 clang-format==19.1.5
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            $exes = Find-LlvmExes $env:LLVM_DIR
+            if (-not ($exes | Where-Object Name -eq 'clang-tidy.exe') -or -not ($exes | Where-Object Name -eq 'clang-format.exe')) {
+              throw "Expected clang-tidy.exe and clang-format.exe under $env:LLVM_DIR"
+            }
+          }
+          # The binaries the wheels carry, not their Python launchers.
+          $exes | ForEach-Object DirectoryName | Sort-Object -Unique | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: Check localization tables
+        shell: pwsh
+        run: ./tools/check-localization.ps1
+      - name: Test localization validation
+        shell: pwsh
+        run: ./tools/tests/check-localization.tests.ps1
+      - name: Build native, settings, the tests and the portable package
+        shell: pwsh
+        run: ./tools/build.ps1 -Zip -Tests -Ninja
+      - name: Lint (text, native rules, clang-format, clang-tidy, .NET)
+        shell: pwsh
+        env:
+          GH_EVENT: ${{ github.event_name }}
+          GH_BASE_REF: ${{ github.base_ref }}
+          GH_BEFORE: ${{ github.event.before }}
+        # A push or a pull request: what it changed (and the units including a changed header).
+        run: |
+          $baseArgs = @{}
+          if ($env:GH_EVENT -eq 'pull_request') {
+            $baseArgs = @{ Base = "origin/$env:GH_BASE_REF" }
+          } elseif ($env:GH_EVENT -eq 'push') {
+            $before = $env:GH_BEFORE
+            if ($before -and $before -notmatch '^0+$') {
+              git rev-parse --verify --quiet "$before^{commit}" *> $null
+              if ($LASTEXITCODE -eq 0) {
+                git merge-base --is-ancestor $before HEAD *> $null
+                if ($LASTEXITCODE -eq 0) { $baseArgs = @{ Base = $before } }
+              }
+            }
+          }
+          ./tools/lint.ps1 -Tidy -DotNet -BuildDir native/build/win-x64 @baseArgs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Test lint rules
+        shell: pwsh
+        run: ./tools/tests/lint.tests.ps1
+      - name: Run native and settings regression checks
+        shell: pwsh
+        run: |
+          ctest --test-dir native/build/win-x64 --output-on-failure --timeout 60
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          dotnet run --project tests/SettingsChecks/SettingsChecks.csproj -c Release -- --core-normalizer native/build/win-x64/tests/display_settings_tests.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          dotnet run --project tests/LocalizationChecks/LocalizationChecks.csproj -c Release
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Test updater and package scripts
+        shell: pwsh
+        run: |
+          $zips = @(Get-ChildItem -LiteralPath dist -Filter 'Atrium-*-win-x64.zip')
+          if ($zips.Count -ne 1) { throw "Expected 1 package zip in dist/, found $($zips.Count)." }
+          ./tools/tests/update.tests.ps1 -CandidateZipPath $zips[0].FullName
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./tools/tests/uninstall.tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./tools/tests/verify-package.tests.ps1 -CandidateZipPath $zips[0].FullName -RequireRealPackage
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Verify packaged portable zip
+        shell: pwsh
+        run: ./tools/verify-package.ps1 -SmokeStart
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Atrium-win-x64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  asan:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Configure MSVC x64 and ASan runtime path
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = if (Test-Path $vswhere) { & $vswhere -latest -products * -property installationPath 2>$null } else { $null }
+          $vcvars = if ($vs) { Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat' } else { $null }
+          if (-not $vcvars -or -not (Test-Path $vcvars)) {
+            throw 'asan: Visual Studio vcvars64.bat not found'
+          }
+          $before = @{}
+          Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          $envLines = & cmd /c "`"$vcvars`" >nul && set"
+          if ($LASTEXITCODE) { throw "asan: vcvars64.bat failed (exit $LASTEXITCODE)" }
+          $vcTools = $null
+          foreach ($line in $envLines) {
+            if ($line -match '^([^=]+)=(.*)$') {
+              $k = $Matches[1]; $v = $Matches[2]
+              if ($k -ieq 'VCToolsInstallDir') { $vcTools = $v }
+              if ($k -ieq 'PATH' -or $before[$k] -cne $v) {
+                "$k=$v" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+              }
+            }
+          }
+          $asanDir = if ($vcTools) { Join-Path $vcTools 'bin\Hostx64\x64' } else { $null }
+          if (-not $asanDir -or -not (Test-Path (Join-Path $asanDir 'clang_rt.asan_dynamic-x86_64.dll'))) {
+            throw 'asan: clang_rt.asan_dynamic-x86_64.dll not found beside the selected MSVC toolset'
+          }
+          $asanDir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: Configure native with AddressSanitizer
+        shell: pwsh
+        run: cmake -G Ninja -S native -B native/build/asan -DCMAKE_BUILD_TYPE=Release -DATRIUM_ASAN=ON -DATRIUM_BUILD_TESTS=ON -DATRIUM_DEVELOPMENT=ON
+      - name: Build native with AddressSanitizer
+        shell: pwsh
+        run: cmake --build native/build/asan
+      - name: Run native tests under AddressSanitizer
+        shell: pwsh
+        run: ctest --test-dir native/build/asan --output-on-failure --timeout 60

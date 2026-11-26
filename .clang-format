@@ -1,0 +1,33 @@
+BasedOnStyle: WebKit
+ColumnLimit: 160
+BreakStringLiterals: false # a split Tr() key no longer matches its translation
+IndentWidth: 4
+NamespaceIndentation: None
+FixNamespaceComments: true
+SortIncludes: Never
+AlignAfterOpenBracket: Align
+AlignOperands: Align
+AlignTrailingComments:
+  Kind: Leave
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: All
+AllowShortBlocksOnASingleLine: Always
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortEnumsOnASingleLine: true
+BreakBeforeBinaryOperators: None
+Cpp11BracedListStyle: true
+PointerAlignment: Left
+AccessModifierOffset: -4
+IndentCaseLabels: false
+BreakConstructorInitializers: BeforeColon
+PackConstructorInitializers: CurrentLine
+InsertNewlineAtEOF: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+SpaceBeforeCpp11BracedList: false
+SpaceAfterTemplateKeyword: false
+AlwaysBreakTemplateDeclarations: No
+BreakBeforeTernaryOperators: false
+SpaceInEmptyBlock: false
