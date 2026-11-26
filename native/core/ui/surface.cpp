@@ -357,6 +357,10 @@ LRESULT CALLBACK Surface::Proc(HWND h, UINT m, WPARAM w, LPARAM l)
         self->PublishPanel();
         self->Invalidate();
         return 0;
+    case WM_SYSCOMMAND:
+        if (self->desktopLayer_ && (w & 0xFFF0) == SC_MINIMIZE)
+            return 0;
+        return DefWindowProcW(h, m, w, l);
     case WM_CLOSE:
         if (self->onDismiss)
             self->onDismiss();

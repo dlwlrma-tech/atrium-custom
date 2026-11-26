@@ -46,6 +46,7 @@ public:
     // Adds a widget in the first free place; false when there is no room.
     bool Add(WidgetKind kind, WidgetSize size);
     void OnShellRestart();
+    void OnShowDesktop();
     static bool ParseNames(const std::wstring& kind, const std::wstring& size, WidgetKind& outKind, WidgetSize& outSize);
 
     std::function<void()> onCalendar;    // a calendar widget was clicked

@@ -49,8 +49,12 @@ WidgetStackPlan ComputeWidgetStackPlan(const std::vector<StackWindow>& windows, 
     size_t desktopIdx = windows.size(), lowestIdx = windows.size();
     HWND above = nullptr;
     bool fgIsHost = false;
+    bool fgIsShell = !fgRoot;
     for (size_t i = 0; i < windows.size(); ++i) {
         const StackWindow& w = windows[i];
+        if (fgRoot && w.hwnd == fgRoot &&
+            (w.cls == L"Progman" || w.cls == L"WorkerW" || w.cls == L"Shell_TrayWnd" || w.cls == L"Shell_SecondaryTrayWnd"))
+            fgIsShell = true;
         if (IsRealDesktopHost(w, monitorRect)) {
             fgIsHost = fgIsHost || (fgRoot && w.hwnd == fgRoot);
             if (!plan.desktopHost) {
@@ -69,7 +73,7 @@ WidgetStackPlan ComputeWidgetStackPlan(const std::vector<StackWindow>& windows, 
     }
     const bool desktopIsFront = plan.desktopHost && (!plan.lowestApp || desktopIdx < lowestIdx);
     const bool noAppDesktop = plan.desktopHost && !plan.lowestApp && (!fgIsOurs || wasShowDesktop);
-    plan.showDesktop = noAppDesktop || (desktopIsFront && (fgIsHost || (wasShowDesktop && fgIsOurs)));
+    plan.showDesktop = noAppDesktop || (desktopIsFront && (fgIsHost || fgIsShell || (wasShowDesktop && fgIsOurs)));
     if (plan.showDesktop || (!plan.lowestApp && plan.desktopHost))
         plan.after = above ? above : HWND_TOP;
     else
@@ -122,10 +126,9 @@ std::vector<StackWindow> CollectStackSnapshot(const std::vector<HWND>& widgetHwn
 void ApplyWidgetZOrder(const std::vector<HWND>& widgetHwnds, const WidgetStackPlan& plan, DWORD& swpErr)
 {
     const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
-    if (plan.showDesktop)
-        for (HWND hw : widgetHwnds)
-            if (!IsWindowVisible(hw) || IsIconic(hw))
-                ShowWindow(hw, SW_SHOWNOACTIVATE);
+    for (HWND hw : widgetHwnds)
+        if (!IsWindowVisible(hw) || IsIconic(hw))
+            ShowWindow(hw, SW_SHOWNOACTIVATE);
     for (HWND hw : widgetHwnds)
         if (GetWindowLongPtrW(hw, GWL_EXSTYLE) & WS_EX_TOPMOST)
             SetWindowPos(hw, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
@@ -163,7 +166,9 @@ void ApplyWidgetZOrder(const std::vector<HWND>& widgetHwnds, const WidgetStackPl
             continue;
         }
         swpErr = GetLastError();
-        if (plan.lowestApp && after != plan.lowestApp && SetWindowPos(hw, plan.lowestApp, 0, 0, 0, 0, flags))
+        if ((plan.showDesktop || !plan.lowestApp) && after != HWND_TOP && SetWindowPos(hw, HWND_TOP, 0, 0, 0, 0, flags))
+            after = hw;
+        else if (plan.lowestApp && after != plan.lowestApp && SetWindowPos(hw, plan.lowestApp, 0, 0, 0, 0, flags))
             after = hw;
         else if (after != HWND_BOTTOM)
             SetWindowPos(hw, HWND_BOTTOM, 0, 0, 0, 0, flags);

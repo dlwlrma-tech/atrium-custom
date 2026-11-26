@@ -30,6 +30,7 @@ public:
     void SetMonitor(HMONITOR monitor, bool refresh = false);
     void SetRadius(float dip);
     void OnShellRestart();
+    void OnShowDesktop();
     void AddNewFence();
     void AddFolderFence();
 

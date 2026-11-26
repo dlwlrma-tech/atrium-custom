@@ -80,6 +80,7 @@ constexpr UINT_PTR kStatusTimer = 0x52;       // the bar's status icon
 constexpr UINT_PTR kTrayFocusTimer = 0x53;    // after a forwarded tray click
 constexpr UINT_PTR kDisplaySettleTimer = 0x56; // once more after a display change, the topology settled
 constexpr UINT_PTR kMessengerTimer = 0x57;     // a chat app's flash: did a card with its text follow?
+constexpr UINT_PTR kShowDesktopTimer = 0x58;   // keep desktop widgets and fences above WorkerW after Show Desktop
 constexpr UINT_PTR kReadyTimer = 0x54;       // only during an update startup handshake
 constexpr UINT kStatusMs = 3000;
 constexpr UINT kTrayId = 1;
@@ -95,6 +96,7 @@ struct App {
     SystemStatus lastStatus;
     bool capturable = false;
     bool displaysReady = false;
+    int showDesktopRestacks = 0;
     ULONGLONG switchedBarAt = 0; // switching displays must not suppress the first popup click
     std::unique_ptr<SystemStatusReader> status;
     std::unique_ptr<SettingsServer> server;
@@ -675,7 +677,13 @@ void ConfigureBar(Bar& bar)
     bar.onNotifyClick = [](RECT) { g_app.notes->ToggleCenter(); };
     bar.onTrayClick = ToggleTray;
     ConfigureBarTray(bar, *g_app.tray, [] { return g_app.server.get(); });
-    bar.onDesktopClick = [] { SendWinShortcut('D'); }; // the system's Show Desktop: a second click brings the windows back
+    bar.onDesktopClick = [] {
+        AllowSetForegroundWindow(ASFW_ANY);
+        SendWinShortcut('D'); // the system's Show Desktop: a second click brings the windows back
+        g_app.showDesktopRestacks = 5;
+        if (g_app.host)
+            SetTimer(g_app.host, kShowDesktopTimer, 50, nullptr);
+    };
     bar.onStatusClick = ToggleControl;
     g_app.extras->ConfigureBar(bar);
     bar.onImeClick = [] {
@@ -1049,6 +1057,17 @@ bool HandleHostTimer(HWND h, WPARAM w)
             SyncDisplayBars(g_app.displaySettings, true);
             UpdateDesktopMonitor(true);
         }
+        return true;
+    }
+    if (w == kShowDesktopTimer) {
+        if (g_app.widgets)
+            g_app.widgets->OnShowDesktop();
+        if (g_app.fences)
+            g_app.fences->OnShowDesktop();
+        if (--g_app.showDesktopRestacks > 0)
+            SetTimer(h, kShowDesktopTimer, g_app.showDesktopRestacks >= 3 ? 100 : 200, nullptr);
+        else
+            KillTimer(h, kShowDesktopTimer);
         return true;
     }
     if (w == kTrayFocusTimer)

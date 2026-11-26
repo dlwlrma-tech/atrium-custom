@@ -339,6 +339,14 @@ void DesktopWidgets::OnShellRestart()
     Restack();
 }
 
+void DesktopWidgets::OnShowDesktop()
+{
+    if (!enabled_)
+        return;
+    wasShowDesktop_ = true;
+    Restack();
+}
+
 // ---- layout ------------------------------------------------------------------
 
 void DesktopWidgets::SetStatus(const SystemStatus& status)

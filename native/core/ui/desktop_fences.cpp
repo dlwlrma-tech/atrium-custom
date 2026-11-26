@@ -724,7 +724,7 @@ void CALLBACK DesktopFences::OnWinEvent(HWINEVENTHOOK, DWORD, HWND window, LONG 
 {
     if (g_fences && g_fences->host_ && !g_fences->fences_.empty() && object == OBJID_WINDOW && child == CHILDID_SELF && window &&
         GetAncestor(window, GA_ROOT) == window)
-        SetTimer(g_fences->host_, kRestackTimer, 60, nullptr);
+        SetTimer(g_fences->host_, kRestackTimer, 30, nullptr);
 }
 
 float DesktopFences::Scale() const
@@ -810,7 +810,19 @@ void DesktopFences::SetRadius(float dip)
             f->surface->SetRadius(radius_);
 }
 
-void DesktopFences::OnShellRestart() { Restack(); }
+void DesktopFences::OnShellRestart()
+{
+    wasShowDesktop_ = false;
+    Restack();
+}
+
+void DesktopFences::OnShowDesktop()
+{
+    if (!enabled_)
+        return;
+    wasShowDesktop_ = true;
+    Restack();
+}
 
 void DesktopFences::Restack()
 {
