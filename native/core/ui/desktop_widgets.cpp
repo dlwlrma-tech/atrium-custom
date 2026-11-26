@@ -11,6 +11,7 @@
 
 #include <dwmapi.h>
 #include <imm.h>
+#include <pdhmsg.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
