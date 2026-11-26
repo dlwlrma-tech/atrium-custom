@@ -148,7 +148,7 @@ endif()
 target_link_libraries(atrium_core_lib PUBLIC
     windowsapp d3d11 dxgi dxguid dcomp d2d1 dwrite shcore user32 gdi32 shell32 ole32
     dwmapi version propsys shlwapi oleaut32 uuid imm32 powrprof wlanapi windowscodecs winhttp setupapi taskschd
-    iphlpapi advapi32 comctl32 icu wbemuuid secur32 winsqlite3)
+    iphlpapi advapi32 comctl32 icu wbemuuid secur32 winsqlite3 pdh)
 
 add_executable(atrium_core WIN32 main.cpp core.rc core.manifest)
 # build/win-x64/<Config>/Atrium.exe

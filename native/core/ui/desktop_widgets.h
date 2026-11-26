@@ -17,6 +17,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <pdh.h>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -136,6 +137,8 @@ private:
     ChineseCalendar lunar_;
     int lastMinute_ = -1;
     uint64_t cpuIdle_ = 0, cpuTotal_ = 0; // the last GetSystemTimes
+    PDH_HQUERY gpuQuery_ = nullptr;
+    PDH_HCOUNTER gpuCounter_ = nullptr;
     unsigned photoGen_ = 0;
     std::mutex photoMu_;
     std::condition_variable photoCv_;

@@ -11,12 +11,15 @@
 #include "win32_path.h"
 
 #include <imm.h>
+#include <commctrl.h>
+#include <exdisp.h>
 #include <ole2.h>
 #include <shellapi.h>
 #include <shellscalingapi.h>
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
+#include <servprov.h>
 #include <windowsx.h>
 
 #include <winrt/Windows.Data.Json.h>
@@ -27,6 +30,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cwctype>
+#include <iterator>
+#include <utility>
 
 namespace json = winrt::Windows::Data::Json;
 
@@ -36,9 +41,11 @@ namespace {
 
 constexpr wchar_t kFenceHostClass[] = L"AtriumFenceHost";
 constexpr UINT WM_FENCE_LOADED = WM_APP + 0x81;
+constexpr UINT WM_DESKTOP_MOUSE_DOWN = WM_APP + 0x82;
 constexpr UINT_PTR kCollapseTimer = 0x5F01;
 constexpr UINT_PTR kRefreshTimer = 0x5F02;
 constexpr UINT_PTR kRestackTimer = 0x5F03;
+constexpr UINT_PTR kSafetyTimer = 0x5F04;
 constexpr UINT kCollapseDelayMs = 1;
 constexpr UINT kRefreshMs = 5000;
 constexpr float kHeaderH = 34.f;
@@ -62,6 +69,95 @@ bool InRect(const D2D1_RECT_F& r, float x, float y) { return x >= r.left && x < 
 
 std::wstring FencesJsonPath() { return DataDirectory() + L"\\fences.json"; }
 std::wstring DefaultFencesDir() { return DataDirectory() + L"\\Fences"; }
+
+HWND DesktopListViewFor(HWND parent)
+{
+    if (!parent)
+        return nullptr;
+    HWND view = FindWindowExW(parent, nullptr, L"SHELLDLL_DefView", nullptr);
+    return view ? FindWindowExW(view, nullptr, L"SysListView32", nullptr) : nullptr;
+}
+
+HWND FindDesktopListView()
+{
+    if (HWND list = DesktopListViewFor(FindWindowW(L"Progman", nullptr)))
+        return list;
+    struct Search { HWND list = nullptr; } search;
+    EnumWindows(
+        [](HWND top, LPARAM param) -> BOOL {
+            wchar_t cls[32]{};
+            GetClassNameW(top, cls, 32);
+            if (wcscmp(cls, L"WorkerW") != 0)
+                return TRUE;
+            auto* state = reinterpret_cast<Search*>(param);
+            state->list = DesktopListViewFor(top);
+            return state->list ? FALSE : TRUE;
+        },
+        LPARAM(&search));
+    return search.list;
+}
+
+bool IsWindowInside(HWND child, HWND parent)
+{
+    for (HWND at = child; at; at = GetParent(at))
+        if (at == parent)
+            return true;
+    return false;
+}
+
+bool GetDesktopFolderView(winrt::com_ptr<IFolderView2>& folderView, winrt::com_ptr<IFolderViewOptions>& viewOptions)
+{
+    winrt::com_ptr<IShellWindows> windows;
+    if (FAILED(CoCreateInstance(CLSID_ShellWindows, nullptr, CLSCTX_LOCAL_SERVER, IID_PPV_ARGS(windows.put()))) || !windows)
+        return false;
+    VARIANT empty{};
+    VariantInit(&empty);
+    long hwnd = 0;
+    winrt::com_ptr<IDispatch> dispatch;
+    if (windows->FindWindowSW(&empty, &empty, SWC_DESKTOP, &hwnd, SWFO_NEEDDISPATCH, dispatch.put()) != S_OK || !dispatch)
+        return false;
+    auto browser = dispatch.try_as<IWebBrowserApp>();
+    auto service = dispatch.try_as<IServiceProvider>();
+    if (!browser || !service)
+        return false;
+    winrt::com_ptr<IShellBrowser> shellBrowser;
+    if (FAILED(service->QueryService(SID_STopLevelBrowser, IID_PPV_ARGS(shellBrowser.put()))) || !shellBrowser)
+        return false;
+    winrt::com_ptr<IShellView> shellView;
+    if (FAILED(shellBrowser->QueryActiveShellView(shellView.put())) || !shellView)
+        return false;
+    folderView = shellView.try_as<IFolderView2>();
+    viewOptions = shellView.try_as<IFolderViewOptions>();
+    return bool(folderView) && bool(viewOptions);
+}
+
+bool IsBlankDesktopPoint(IFolderView2* view, HWND list, POINT screen)
+{
+    DWORD flags = 0;
+    constexpr DWORD hiddenMask = FWF_NOICONS | FWF_HIDEFILENAMES;
+    if (!view || !list || FAILED(view->GetCurrentFolderFlags(&flags)) || !(flags & FWF_DESKTOP))
+        return false;
+    if (flags & hiddenMask)
+        return true;
+    POINT point = screen;
+    if (!ScreenToClient(list, &point))
+        return false;
+    POINT spacing{};
+    int count = 0;
+    if (FAILED(view->GetSpacing(&spacing)) || spacing.x <= 0 || spacing.y <= 0 || FAILED(view->ItemCount(SVGIO_ALLVIEW, &count)))
+        return false;
+    for (int i = 0; i < count; ++i) {
+        PITEMID_CHILD item = nullptr;
+        if (FAILED(view->Item(i, &item)) || !item)
+            continue;
+        POINT origin{};
+        const bool gotPosition = SUCCEEDED(view->GetItemPosition(item, &origin));
+        CoTaskMemFree(item);
+        if (gotPosition && point.x >= origin.x && point.x < origin.x + spacing.x && point.y >= origin.y && point.y < origin.y + spacing.y)
+            return false;
+    }
+    return true;
+}
 
 std::wstring BaseName(const std::wstring& path)
 {
@@ -506,18 +602,28 @@ DesktopFences::DesktopFences(HINSTANCE instance) : instance_(instance)
     wc.lpszClassName = kFenceHostClass;
     RegisterClassExW(&wc);
     host_ = CreateWindowExW(WS_EX_TOOLWINDOW, kFenceHostClass, L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance, nullptr);
-    eventHook_ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, OnWinEvent, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    desktopMouseHook_ = SetWindowsHookExW(WH_MOUSE_LL, DesktopMouseProc, instance, 0);
+    const DWORD eventFlags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
+    eventHook_ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, OnWinEvent, 0, 0, eventFlags);
+    minHook_ = SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND, nullptr, OnWinEvent, 0, 0, eventFlags);
+    showHook_ = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE, nullptr, OnWinEvent, 0, 0, eventFlags);
+    uncloakHook_ = SetWinEventHook(EVENT_OBJECT_UNCLOAKED, EVENT_OBJECT_UNCLOAKED, nullptr, OnWinEvent, 0, 0, eventFlags);
     worker_ = std::thread([this] { WorkerLoop(); });
     Load();
     SetTimer(host_, kRefreshTimer, kRefreshMs, nullptr);
+    SetTimer(host_, kSafetyTimer, 3000, nullptr);
 }
 
 DesktopFences::~DesktopFences()
 {
     KillTimer(host_, kRefreshTimer);
     KillTimer(host_, kRestackTimer);
-    if (eventHook_)
-        UnhookWinEvent(eventHook_);
+    KillTimer(host_, kSafetyTimer);
+    for (HWINEVENTHOOK* hook : {&eventHook_, &minHook_, &showHook_, &uncloakHook_})
+        if (*hook)
+            UnhookWinEvent(std::exchange(*hook, nullptr));
+    if (desktopMouseHook_)
+        UnhookWindowsHookEx(desktopMouseHook_);
     {
         std::lock_guard g(mutex_);
         stop_ = true;
@@ -541,6 +647,10 @@ LRESULT CALLBACK DesktopFences::HostProc(HWND h, UINT m, WPARAM w, LPARAM l)
                 g_fences->ApplyLoadResult(std::move(*res));
             return 0;
         }
+        if (m == WM_DESKTOP_MOUSE_DOWN) {
+            g_fences->OnDesktopMouseDown(POINT{GET_X_LPARAM(l), GET_Y_LPARAM(l)});
+            return 0;
+        }
         if (m == WM_TIMER && w == kRefreshTimer) {
             for (const auto& f : g_fences->fences_)
                 if (f->surface && f->surface->Visible())
@@ -552,13 +662,77 @@ LRESULT CALLBACK DesktopFences::HostProc(HWND h, UINT m, WPARAM w, LPARAM l)
             g_fences->Restack();
             return 0;
         }
+        if (m == WM_TIMER && w == kSafetyTimer) {
+            g_fences->Restack();
+            return 0;
+        }
     }
     return DefWindowProcW(h, m, w, l);
 }
 
-void CALLBACK DesktopFences::OnWinEvent(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD)
+LRESULT CALLBACK DesktopFences::DesktopMouseProc(int code, WPARAM message, LPARAM data)
 {
-    if (g_fences && g_fences->host_ && !g_fences->fences_.empty())
+    if (code == HC_ACTION && message == WM_LBUTTONDOWN && g_fences && g_fences->host_) {
+        const auto* mouse = reinterpret_cast<const MSLLHOOKSTRUCT*>(data);
+        const HWND list = FindDesktopListView();
+        const HWND under = mouse ? WindowFromPoint(mouse->pt) : nullptr;
+        if (list && under && IsWindowInside(under, list)) {
+            const LPARAM point = MAKELPARAM(WORD(mouse->pt.x), WORD(mouse->pt.y));
+            PostMessageW(g_fences->host_, WM_DESKTOP_MOUSE_DOWN, 0, point);
+        } else {
+            g_fences->lastDesktopClickMs_ = 0;
+        }
+    }
+    return CallNextHookEx(g_fences ? g_fences->desktopMouseHook_ : nullptr, code, message, data);
+}
+
+void DesktopFences::OnDesktopMouseDown(POINT screen)
+{
+    const HWND list = FindDesktopListView();
+    winrt::com_ptr<IFolderView2> view;
+    winrt::com_ptr<IFolderViewOptions> options;
+    if (!list || !GetDesktopFolderView(view, options) || !IsBlankDesktopPoint(view.get(), list, screen)) {
+        lastDesktopClickMs_ = 0;
+        return;
+    }
+    const ULONGLONG now = GetTickCount64();
+    const int dx = std::abs(screen.x - lastDesktopClick_.x);
+    const int dy = std::abs(screen.y - lastDesktopClick_.y);
+    const int doubleWidth = std::max(1, GetSystemMetrics(SM_CXDOUBLECLK));
+    const int doubleHeight = std::max(1, GetSystemMetrics(SM_CYDOUBLECLK));
+    if (lastDesktopClickMs_ && now - lastDesktopClickMs_ <= GetDoubleClickTime() && dx <= doubleWidth && dy <= doubleHeight) {
+        lastDesktopClickMs_ = 0;
+        ToggleDesktopIcons();
+        return;
+    }
+    lastDesktopClickMs_ = now;
+    lastDesktopClick_ = screen;
+}
+
+void DesktopFences::ToggleDesktopIcons()
+{
+    winrt::com_ptr<IFolderView2> view;
+    winrt::com_ptr<IFolderViewOptions> options;
+    if (!GetDesktopFolderView(view, options))
+        return;
+    DWORD flags = 0;
+    FOLDERVIEWOPTIONS viewFlags = FVO_DEFAULT;
+    constexpr DWORD hiddenMask = FWF_NOICONS | FWF_HIDEFILENAMES;
+    if (FAILED(view->GetCurrentFolderFlags(&flags)) || !(flags & FWF_DESKTOP) || FAILED(options->GetFolderViewOptions(&viewFlags)))
+        return;
+    if (FAILED(options->SetFolderViewOptions(FVO_CUSTOMPOSITION, FOLDERVIEWOPTIONS(viewFlags | FVO_CUSTOMPOSITION))))
+        return;
+    const DWORD nextFlags = (flags & hiddenMask) ? (flags & ~hiddenMask) : (flags | hiddenMask);
+    const HRESULT changed = view->SetCurrentFolderFlags(hiddenMask, nextFlags);
+    options->SetFolderViewOptions(FVO_CUSTOMPOSITION, viewFlags);
+    if (FAILED(changed))
+        Log(L"desktop icons: could not toggle visibility (0x%08X)", unsigned(changed));
+}
+
+void CALLBACK DesktopFences::OnWinEvent(HWINEVENTHOOK, DWORD, HWND window, LONG object, LONG child, DWORD, DWORD)
+{
+    if (g_fences && g_fences->host_ && !g_fences->fences_.empty() && object == OBJID_WINDOW && child == CHILDID_SELF && window &&
+        GetAncestor(window, GA_ROOT) == window)
         SetTimer(g_fences->host_, kRestackTimer, 60, nullptr);
 }
 

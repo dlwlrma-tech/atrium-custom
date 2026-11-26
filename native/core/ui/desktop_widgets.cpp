@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <unordered_map>
 
 namespace json = winrt::Windows::Data::Json;
 
@@ -275,6 +276,8 @@ DesktopWidgets::~DesktopWidgets()
         photoWorker_.join();
     if (host_)
         DestroyWindow(host_);
+    if (gpuQuery_)
+        PdhCloseQuery(gpuQuery_);
     g_widgets = nullptr;
 }
 
@@ -941,13 +944,37 @@ void DesktopWidgets::SampleSystem()
         world_.memoryTotalGb = double(ms.ullTotalPhys) / kGb;
         world_.memoryGb = double(ms.ullTotalPhys - ms.ullAvailPhys) / kGb;
     }
-    wchar_t windows[MAX_PATH] = {};
-    GetWindowsDirectoryW(windows, MAX_PATH);
-    std::wstring root = std::wstring(windows).substr(0, 3); // "C:\"
-    ULARGE_INTEGER avail{}, total{}, free{};
-    if (GetDiskFreeSpaceExW(root.c_str(), &avail, &total, &free) && total.QuadPart) {
-        world_.disk = 1.f - float(double(free.QuadPart) / double(total.QuadPart));
-        world_.diskFreeGb = double(avail.QuadPart) / (1024.0 * 1024 * 1024);
+    if (!gpuCounter_) {
+        if (!gpuQuery_ && PdhOpenQueryW(nullptr, 0, &gpuQuery_) == ERROR_SUCCESS &&
+            PdhAddEnglishCounterW(gpuQuery_, L"\\GPU Engine(*)\\Utilization Percentage", 0, &gpuCounter_) != ERROR_SUCCESS) {
+            PdhCloseQuery(gpuQuery_);
+            gpuQuery_ = nullptr;
+        }
+    }
+    if (gpuCounter_ && PdhCollectQueryData(gpuQuery_) == ERROR_SUCCESS) {
+        DWORD bytes = 0, count = 0;
+        PDH_STATUS result = PdhGetFormattedCounterArrayW(gpuCounter_, PDH_FMT_DOUBLE, &bytes, &count, nullptr);
+        if (result == PDH_MORE_DATA && bytes) {
+            std::vector<BYTE> buffer(bytes);
+            auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
+            if (PdhGetFormattedCounterArrayW(gpuCounter_, PDH_FMT_DOUBLE, &bytes, &count, items) == ERROR_SUCCESS) {
+                std::unordered_map<std::wstring, double> byAdapter;
+                for (DWORD i = 0; i < count; ++i) {
+                    if (items[i].FmtValue.CStatus != ERROR_SUCCESS || !items[i].szName)
+                        continue;
+                    const std::wstring instance(items[i].szName);
+                    const size_t luid = instance.find(L"luid_"), phys = instance.find(L"_phys_", luid);
+                    const std::wstring adapter = luid != std::wstring::npos && phys != std::wstring::npos
+                                                     ? instance.substr(luid, phys - luid)
+                                                     : instance;
+                    byAdapter[adapter] += std::max(0.0, items[i].FmtValue.doubleValue);
+                }
+                double busiestAdapter = 0;
+                for (const auto& [adapter, usage] : byAdapter)
+                    busiestAdapter = std::max(busiestAdapter, usage);
+                world_.gpu = float(std::clamp(busiestAdapter / 100.0, 0.0, 1.0));
+            }
+        }
     }
 }
 

@@ -391,7 +391,7 @@ void PaintBattery(Canvas& c, const WidgetWorld& w, const Pal& p, float fw, float
     }
 }
 
-// The processor, the memory and the system disk: bars (small) or rings
+// The processor, graphics processor and memory: bars (small) or rings
 // (medium), green, orange from 70 %, red from 90 %.
 void PaintSystem(Canvas& c, WidgetSize size, const WidgetWorld& w, const Pal& p, float fw, float fh)
 {
@@ -402,8 +402,7 @@ void PaintSystem(Canvas& c, WidgetSize size, const WidgetWorld& w, const Pal& p,
     };
     wchar_t mem[32];
     swprintf_s(mem, L"%.1f / %.0f GB", w.memoryGb, w.memoryTotalGb);
-    const std::wstring disk = TrFormat(L"%.0f GB free", w.diskFreeGb);
-    const Gauge gauges[] = {{L"CPU", w.cpu, Tr(L"CPU")}, {Tr(L"Memory"), w.memory, mem}, {Tr(L"Disk"), w.disk, disk}};
+    const Gauge gauges[] = {{L"CPU", w.cpu, Tr(L"CPU")}, {Tr(L"Memory"), w.memory, mem}, {L"GPU", w.gpu, Tr(L"GPU")}};
     auto colour = [&](float v) { return v >= 0.9f ? p.red : v >= 0.7f ? p.orange : p.green; };
     auto pct = [](float v) { return std::to_wstring(int(std::lround(std::clamp(v, 0.f, 1.f) * 100))) + L"%"; };
     if (size == WidgetSize::Small) {

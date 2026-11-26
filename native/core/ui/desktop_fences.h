@@ -61,6 +61,7 @@ private:
     };
 
     static LRESULT CALLBACK HostProc(HWND, UINT, WPARAM, LPARAM);
+    static LRESULT CALLBACK DesktopMouseProc(int, WPARAM, LPARAM);
     static void CALLBACK OnWinEvent(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD);
 
     void Load();
@@ -80,6 +81,8 @@ private:
     void QueueReload(Fence& f, bool force = false);
     void WorkerLoop();
     void ApplyLoadResult(LoadResult res);
+    void OnDesktopMouseDown(POINT screen);
+    void ToggleDesktopIcons();
     void PaintFence(Fence& f, Canvas& c);
     bool HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, LRESULT& r);
     int HitFenceItem(const Fence& f, float x, float y) const;
@@ -102,12 +105,18 @@ private:
     HINSTANCE instance_;
     HWND host_ = nullptr;
     HWINEVENTHOOK eventHook_ = nullptr;
+    HWINEVENTHOOK minHook_ = nullptr;
+    HWINEVENTHOOK showHook_ = nullptr;
+    HWINEVENTHOOK uncloakHook_ = nullptr;
+    HHOOK desktopMouseHook_ = nullptr;
     HMONITOR monitor_ = nullptr;
     bool enabled_ = true;
     bool oleReady_ = false;
     bool wasShowDesktop_ = false;
     float radius_ = 18.f;
     uint64_t nextGen_ = 1;
+    ULONGLONG lastDesktopClickMs_ = 0;
+    POINT lastDesktopClick_{};
     std::vector<std::unique_ptr<Fence>> fences_;
 
     std::mutex mutex_;

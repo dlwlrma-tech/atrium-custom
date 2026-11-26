@@ -95,8 +95,8 @@ struct WidgetWorld {
     std::wstring city; // the local time zone's first city
     const ChineseCalendar* lunar = nullptr;
     SystemStatus status;
-    float cpu = 0, memory = 0, disk = 0; // in use, 0..1
-    double memoryGb = 0, memoryTotalGb = 0, diskFreeGb = 0;
+    float cpu = 0, memory = 0, gpu = 0; // in use, 0..1
+    double memoryGb = 0, memoryTotalGb = 0;
     Weather weather; // the forecast (weather.ok false: none yet)
     std::vector<BluetoothBattery> bluetooth; // the connected devices' batteries
     bool bluetoothRead = false;              // false until the first reading
