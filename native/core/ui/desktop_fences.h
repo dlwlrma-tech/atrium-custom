@@ -48,11 +48,15 @@ private:
         std::wstring id;
         std::wstring folder;
         uint64_t gen = 0;
+        uint64_t previousSignature = 0;
+        bool force = false;
         int iconPx = 48;
     };
     struct LoadResult {
         std::wstring id;
         uint64_t gen = 0;
+        uint64_t signature = 0;
+        bool unchanged = false;
         std::vector<Item> items;
     };
 
@@ -73,7 +77,7 @@ private:
     void PlaceFence(Fence& f, bool pop = false);
     void SetExpanded(Fence& f, bool expanded);
     void Restack();
-    void QueueReload(Fence& f);
+    void QueueReload(Fence& f, bool force = false);
     void WorkerLoop();
     void ApplyLoadResult(LoadResult res);
     void PaintFence(Fence& f, Canvas& c);

@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cwctype>
 
 namespace json = winrt::Windows::Data::Json;
@@ -38,7 +39,7 @@ constexpr UINT WM_FENCE_LOADED = WM_APP + 0x81;
 constexpr UINT_PTR kCollapseTimer = 0x5F01;
 constexpr UINT_PTR kRefreshTimer = 0x5F02;
 constexpr UINT_PTR kRestackTimer = 0x5F03;
-constexpr UINT kCollapseDelayMs = 60;
+constexpr UINT kCollapseDelayMs = 700;
 constexpr UINT kRefreshMs = 5000;
 constexpr float kHeaderH = 34.f;
 constexpr float kPadX = 10.f;
@@ -419,6 +420,7 @@ struct DesktopFences::Fence {
     int lastClickItem = -1;
     ULONGLONG lastClickMs = 0;
     uint64_t loadGen = 0;
+    uint64_t loadSignature = 0;
     std::vector<Item> items;
     std::unique_ptr<Surface> surface;
     winrt::com_ptr<IDropTarget> dropTarget;
@@ -716,7 +718,7 @@ void DesktopFences::Load()
         if (title.empty())
             title = BaseName(folder);
         CreateFence(id, title, folder, num(L"x", 80.f), num(L"y", 80.f), std::clamp(num(L"w", 360.f), kMinW, kMaxW),
-                    std::clamp(num(L"h", 420.f), kMinH, kMaxH), flag(L"locked", false), flag(L"alwaysExpanded", true), flag(L"listView", false));
+                    std::clamp(num(L"h", 420.f), kMinH, kMaxH), flag(L"locked", false), flag(L"alwaysExpanded", false), flag(L"listView", false));
     }
 }
 
@@ -811,7 +813,7 @@ void DesktopFences::AddNewFence()
     const std::wstring folder = baseDir + L"\\" + id;
     SHCreateDirectoryExW(nullptr, folder.c_str(), nullptr);
     const float offset = float((fences_.size() % 5) * 32);
-    CreateFence(id, title, folder, 120.f + offset, 60.f + offset, 360.f, 420.f, false, true);
+    CreateFence(id, title, folder, 120.f + offset, 60.f + offset, 360.f, 420.f, false, false);
     Save();
 }
 
@@ -849,11 +851,11 @@ void DesktopFences::AddFolderFence()
         return;
     const std::wstring id = L"fence-" + std::to_wstring(GetTickCount64());
     const float offset = float((fences_.size() % 5) * 32);
-    CreateFence(id, BaseName(folder), folder, 140.f + offset, 70.f + offset, 380.f, 440.f, false, true);
+    CreateFence(id, BaseName(folder), folder, 140.f + offset, 70.f + offset, 380.f, 440.f, false, false);
     Save();
 }
 
-void DesktopFences::QueueReload(Fence& f)
+void DesktopFences::QueueReload(Fence& f, bool force)
 {
     const uint64_t gen = nextGen_++;
     f.loadGen = gen;
@@ -861,7 +863,7 @@ void DesktopFences::QueueReload(Fence& f)
     {
         std::lock_guard g(mutex_);
         std::erase_if(jobs_, [&](const LoadJob& j) { return j.id == f.id; });
-        jobs_.push_back({f.id, f.folder, gen, iconPx});
+        jobs_.push_back({f.id, f.folder, gen, f.loadSignature, force, iconPx});
     }
     cv_.notify_one();
 }
@@ -882,6 +884,8 @@ void DesktopFences::WorkerLoop()
         LoadResult res;
         res.id = job.id;
         res.gen = job.gen;
+        struct Entry { Item item; };
+        std::vector<Entry> entries;
         std::wstring pattern = job.folder;
         if (!pattern.empty() && pattern.back() != L'\\' && pattern.back() != L'/')
             pattern += L'\\';
@@ -889,8 +893,12 @@ void DesktopFences::WorkerLoop()
         pattern += L'*';
         WIN32_FIND_DATAW fd{};
         HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+        uint64_t signature = 14695981039346656037ull;
+        auto mix = [&](uint64_t value) {
+            signature ^= value;
+            signature *= 1099511628211ull;
+        };
         if (h != INVALID_HANDLE_VALUE) {
-            uint64_t seq = 1;
             do {
                 if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
                     continue;
@@ -900,14 +908,29 @@ void DesktopFences::WorkerLoop()
                 item.isDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
                 item.path = base + fd.cFileName;
                 item.name = DisplayNameFor(fd.cFileName, item.isDir);
-                IconImage img;
-                if (LoadShellImage(item.path, job.iconPx, img, !item.isDir && IsImageExtension(fd.cFileName))) {
-                    item.icon = std::make_shared<const IconImage>(std::move(img));
-                    item.iconId = (job.gen << 16) + seq++;
-                }
-                res.items.push_back(std::move(item));
-            } while (FindNextFileW(h, &fd) && res.items.size() < 256);
+                for (wchar_t ch : fd.cFileName)
+                    mix(uint16_t(ch));
+                mix(fd.dwFileAttributes);
+                mix((uint64_t(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow);
+                mix((uint64_t(fd.ftLastWriteTime.dwHighDateTime) << 32) | fd.ftLastWriteTime.dwLowDateTime);
+                entries.push_back({std::move(item)});
+            } while (FindNextFileW(h, &fd) && entries.size() < 256);
             FindClose(h);
+        }
+        res.signature = signature;
+        if (!job.force && signature == job.previousSignature) {
+            res.unchanged = true;
+        } else {
+            uint64_t seq = 1;
+            res.items.reserve(entries.size());
+            for (Entry& entry : entries) {
+                IconImage img;
+                if (LoadShellImage(entry.item.path, job.iconPx, img, !entry.item.isDir && IsImageExtension(entry.item.path))) {
+                    entry.item.icon = std::make_shared<const IconImage>(std::move(img));
+                    entry.item.iconId = (job.gen << 16) + seq++;
+                }
+                res.items.push_back(std::move(entry.item));
+            }
         }
         std::ranges::sort(res.items, [](const Item& a, const Item& b) {
             if (a.isDir != b.isDir)
@@ -925,6 +948,9 @@ void DesktopFences::ApplyLoadResult(LoadResult res)
 {
     Fence* f = FindFence(res.id);
     if (!f || res.gen != f->loadGen)
+        return;
+    f->loadSignature = res.signature;
+    if (res.unchanged)
         return;
     f->items = std::move(res.items);
     if (f->hoverItem >= int(f->items.size()))
@@ -1198,13 +1224,13 @@ void DesktopFences::ShowFenceMenu(Fence& f, POINT screen, int itemIndex)
                 target->folder = folder;
                 target->title = BaseName(folder);
                 target->scrollY = 0;
-                QueueReload(*target);
+                QueueReload(*target, true);
                 Save();
             }
         } else if (cmd == 13) {
             RevealInExplorer(target->folder);
         } else if (cmd == 14) {
-            QueueReload(*target);
+            QueueReload(*target, true);
         } else if (cmd == 17) {
             RemoveFence(fenceId);
         } else if (cmd == 18) {
