@@ -39,7 +39,7 @@ constexpr UINT WM_FENCE_LOADED = WM_APP + 0x81;
 constexpr UINT_PTR kCollapseTimer = 0x5F01;
 constexpr UINT_PTR kRefreshTimer = 0x5F02;
 constexpr UINT_PTR kRestackTimer = 0x5F03;
-constexpr UINT kCollapseDelayMs = 700;
+constexpr UINT kCollapseDelayMs = 1;
 constexpr UINT kRefreshMs = 5000;
 constexpr float kHeaderH = 34.f;
 constexpr float kPadX = 10.f;
@@ -228,15 +228,15 @@ bool AddFileDropFormat(IDataObject* data, const std::wstring& path)
     return true;
 }
 
-void BeginShellDrag(HWND owner, const std::wstring& path)
+DWORD BeginShellDrag(HWND owner, const std::wstring& path)
 {
     PIDLIST_ABSOLUTE item = nullptr;
     if (FAILED(SHParseDisplayName(path.c_str(), nullptr, &item, 0, nullptr)) || !item)
-        return;
+        return DROPEFFECT_NONE;
     PIDLIST_ABSOLUTE parent = ILCloneFull(item);
     if (!parent) {
         ILFree(item);
-        return;
+        return DROPEFFECT_NONE;
     }
     ILRemoveLastID(parent);
     PCUITEMID_CHILD child = ILFindLastID(item);
@@ -246,10 +246,11 @@ void BeginShellDrag(HWND owner, const std::wstring& path)
     ILFree(parent);
     ILFree(item);
     if (FAILED(created) || !data || !AddFileDropFormat(data.get(), path))
-        return;
+        return DROPEFFECT_NONE;
     auto source = winrt::make<FenceDropSource>();
     DWORD effect = DROPEFFECT_NONE;
     SHDoDragDrop(owner, data.get(), source.get(), DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK, &effect);
+    return effect;
 }
 
 } // namespace
@@ -398,6 +399,7 @@ struct DesktopFences::Fence {
     bool locked = false;
     bool alwaysExpanded = true;
     bool listView = false;
+    float iconScale = 1.f;
     bool expanded = true;
     bool renaming = false;
     std::wstring editText;
@@ -432,14 +434,16 @@ int DesktopFences::HitFenceItem(const Fence& f, float x, float y) const
     if (!f.expanded || y < kHeaderH + kPadY || y > f.h - kPadY || x < kPadX || x > f.w - kPadX)
         return -1;
     if (f.listView) {
-        const int row = int((y - (kHeaderH + kPadY) + f.scrollY) / kListRowH);
+        const int row = int((y - (kHeaderH + kPadY) + f.scrollY) / (kListRowH * f.iconScale));
         return row >= 0 && size_t(row) < f.items.size() ? row : -1;
     }
-    const float bodyW = std::max(kCellW, f.w - 2 * kPadX);
-    const int cols = std::max(1, int(bodyW / kCellW));
+    const float cellW = kCellW * f.iconScale;
+    const float cellH = kCellH * f.iconScale;
+    const float bodyW = std::max(cellW, f.w - 2 * kPadX);
+    const int cols = std::max(1, int(bodyW / cellW));
     const float colW = bodyW / float(cols);
     const int col = std::clamp(int((x - kPadX) / colW), 0, cols - 1);
-    const int row = int((y - (kHeaderH + kPadY) + f.scrollY) / kCellH);
+    const int row = int((y - (kHeaderH + kPadY) + f.scrollY) / cellH);
     const int index = row * cols + col;
     return index >= 0 && size_t(index) < f.items.size() ? index : -1;
 }
@@ -717,8 +721,10 @@ void DesktopFences::Load()
             continue;
         if (title.empty())
             title = BaseName(folder);
-        CreateFence(id, title, folder, num(L"x", 80.f), num(L"y", 80.f), std::clamp(num(L"w", 360.f), kMinW, kMaxW),
-                    std::clamp(num(L"h", 420.f), kMinH, kMaxH), flag(L"locked", false), flag(L"alwaysExpanded", false), flag(L"listView", false));
+        Fence& loaded = CreateFence(id, title, folder, num(L"x", 80.f), num(L"y", 80.f), std::clamp(num(L"w", 360.f), kMinW, kMaxW),
+                                    std::clamp(num(L"h", 420.f), kMinH, kMaxH), flag(L"locked", false), flag(L"alwaysExpanded", false),
+                                    flag(L"listView", false));
+        loaded.iconScale = std::clamp(num(L"iconScale", 1.f), 0.65f, 2.25f);
     }
 }
 
@@ -737,6 +743,7 @@ void DesktopFences::Save() const
         o.SetNamedValue(L"locked", json::JsonValue::CreateBooleanValue(f->locked));
         o.SetNamedValue(L"alwaysExpanded", json::JsonValue::CreateBooleanValue(f->alwaysExpanded));
         o.SetNamedValue(L"listView", json::JsonValue::CreateBooleanValue(f->listView));
+        o.SetNamedValue(L"iconScale", json::JsonValue::CreateNumberValue(f->iconScale));
         arr.Append(o);
     }
     json::JsonObject root;
@@ -859,7 +866,7 @@ void DesktopFences::QueueReload(Fence& f, bool force)
 {
     const uint64_t gen = nextGen_++;
     f.loadGen = gen;
-    const int iconPx = std::clamp(int(std::lround(kIconSz * Scale())), 32, 96);
+    const int iconPx = std::clamp(int(std::lround(kIconSz * f.iconScale * Scale())), 32, 144);
     {
         std::lock_guard g(mutex_);
         std::erase_if(jobs_, [&](const LoadJob& j) { return j.id == f.id; });
@@ -1005,11 +1012,16 @@ void DesktopFences::PaintFence(Fence& f, Canvas& c)
 
     c.Line(kPadX, kHeaderH, w - kPadX, kHeaderH, t.divider);
     const D2D1_RECT_F body = D2D1::RectF(kPadX, kHeaderH + kPadY, w - kPadX, h - kPadY);
-    const float bodyW = std::max(kCellW, body.right - body.left);
+    const float cellW = kCellW * f.iconScale;
+    const float cellH = kCellH * f.iconScale;
+    const float iconSz = kIconSz * f.iconScale;
+    const float listRowH = kListRowH * f.iconScale;
+    const float listIconSz = kListIconSz * f.iconScale;
+    const float bodyW = std::max(cellW, body.right - body.left);
     const float bodyH = std::max(kListRowH, body.bottom - body.top);
-    const int cols = f.listView ? 1 : std::max(1, int(bodyW / kCellW));
+    const int cols = f.listView ? 1 : std::max(1, int(bodyW / cellW));
     const float colW = bodyW / float(cols);
-    const float rowH = f.listView ? kListRowH : kCellH;
+    const float rowH = f.listView ? listRowH : cellH;
     const int rows = f.items.empty() ? 0 : int((f.items.size() + size_t(cols) - 1) / size_t(cols));
     f.maxScrollY = std::max(0.f, float(rows) * rowH - bodyH);
     f.scrollY = std::clamp(f.scrollY, 0.f, f.maxScrollY);
@@ -1019,16 +1031,16 @@ void DesktopFences::PaintFence(Fence& f, Canvas& c)
         c.Text(Tr(L"Drag desktop icons or files here"), body, 12.f, t.subtext, DWRITE_FONT_WEIGHT_NORMAL, 1, true);
     } else if (f.listView) {
         for (size_t i = 0; i < f.items.size(); ++i) {
-            const float y0 = body.top + float(i) * kListRowH - f.scrollY;
-            if (y0 + kListRowH < body.top || y0 > body.bottom)
+            const float y0 = body.top + float(i) * listRowH - f.scrollY;
+            if (y0 + listRowH < body.top || y0 > body.bottom)
                 continue;
-            const D2D1_RECT_F rowRect = D2D1::RectF(body.left, y0 + 1.f, body.right, y0 + kListRowH - 1.f);
+            const D2D1_RECT_F rowRect = D2D1::RectF(body.left, y0 + 1.f, body.right, y0 + listRowH - 1.f);
             if ((f.draggingItem && int(i) == f.pressItem) || int(i) == f.dropHoverItem)
                 c.Fill(rowRect, 8.f, D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.25f));
             else if (int(i) == f.hoverItem)
                 c.Fill(rowRect, 8.f, t.hover);
-            const float iy = (rowRect.top + rowRect.bottom - kListIconSz) / 2.f;
-            const D2D1_RECT_F ir = D2D1::RectF(rowRect.left + 6.f, iy, rowRect.left + 6.f + kListIconSz, iy + kListIconSz);
+            const float iy = (rowRect.top + rowRect.bottom - listIconSz) / 2.f;
+            const D2D1_RECT_F ir = D2D1::RectF(rowRect.left + 6.f, iy, rowRect.left + 6.f + listIconSz, iy + listIconSz);
             if (f.items[i].icon && !f.items[i].icon->Empty()) {
                 wchar_t key[64];
                 swprintf_s(key, L"fence|%llu", f.items[i].iconId);
@@ -1045,16 +1057,16 @@ void DesktopFences::PaintFence(Fence& f, Canvas& c)
             const int col = int(i) % cols;
             const int row = int(i) / cols;
             const float x0 = body.left + float(col) * colW;
-            const float y0 = body.top + float(row) * kCellH - f.scrollY;
-            if (y0 + kCellH < body.top || y0 > body.bottom)
+            const float y0 = body.top + float(row) * cellH - f.scrollY;
+            if (y0 + cellH < body.top || y0 > body.bottom)
                 continue;
-            const D2D1_RECT_F cell = D2D1::RectF(x0 + 2.f, y0 + 2.f, x0 + colW - 2.f, y0 + kCellH - 2.f);
+            const D2D1_RECT_F cell = D2D1::RectF(x0 + 2.f, y0 + 2.f, x0 + colW - 2.f, y0 + cellH - 2.f);
             if ((f.draggingItem && int(i) == f.pressItem) || int(i) == f.dropHoverItem)
                 c.Fill(cell, 10.f, D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.25f));
             else if (int(i) == f.hoverItem)
                 c.Fill(cell, 10.f, t.hover);
             const float icx = (cell.left + cell.right) / 2.f;
-            const D2D1_RECT_F ir = D2D1::RectF(icx - kIconSz / 2.f, cell.top + 6.f, icx + kIconSz / 2.f, cell.top + 6.f + kIconSz);
+            const D2D1_RECT_F ir = D2D1::RectF(icx - iconSz / 2.f, cell.top + 6.f, icx + iconSz / 2.f, cell.top + 6.f + iconSz);
             if (f.items[i].icon && !f.items[i].icon->Empty()) {
                 wchar_t key[64];
                 swprintf_s(key, L"fence|%llu", f.items[i].iconId);
@@ -1291,7 +1303,12 @@ bool DesktopFences::HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, L
                 if (GetCapture() == f.surface->Hwnd())
                     ReleaseCapture();
                 f.surface->Invalidate();
-                BeginShellDrag(f.surface->Hwnd(), dragged.path);
+                const DWORD effect = BeginShellDrag(f.surface->Hwnd(), dragged.path);
+                if (effect & DROPEFFECT_MOVE) {
+                    std::erase_if(f.items, [&](const Item& item) { return item.path == dragged.path; });
+                    f.loadSignature = 0;
+                    QueueReload(f, true);
+                }
                 f.surface->Invalidate();
                 return true;
             }
@@ -1332,6 +1349,14 @@ bool DesktopFences::HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, L
             SetTimer(f.surface->Hwnd(), kCollapseTimer, kCollapseDelayMs, nullptr);
         return true;
     case WM_MOUSEWHEEL:
+        if (f.expanded && (wp & MK_CONTROL)) {
+            const float delta = float(GET_WHEEL_DELTA_WPARAM(wp)) / float(WHEEL_DELTA);
+            f.iconScale = std::clamp(f.iconScale * std::pow(1.1f, delta), 0.65f, 2.25f);
+            f.scrollY = 0.f;
+            Save();
+            f.surface->Invalidate();
+            return true;
+        }
         if (f.expanded && f.maxScrollY > 0.f) {
             const float delta = float(GET_WHEEL_DELTA_WPARAM(wp)) / float(WHEEL_DELTA) * 48.f;
             f.scrollY = std::clamp(f.scrollY - delta, 0.f, f.maxScrollY);
