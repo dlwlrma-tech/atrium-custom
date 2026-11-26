@@ -238,6 +238,36 @@ std::wstring DesktopFolderPath()
     return out;
 }
 
+std::wstring PublicDesktopFolderPath()
+{
+    PWSTR p = nullptr;
+    std::wstring out;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_PublicDesktop, 0, nullptr, &p)) && p) {
+        out = p;
+        CoTaskMemFree(p);
+    }
+    return out;
+}
+
+std::wstring ParentDirOf(const std::wstring& path)
+{
+    std::wstring p = path;
+    while (!p.empty() && (p.back() == L'\\' || p.back() == L'/'))
+        p.pop_back();
+    const size_t slash = p.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? std::wstring() : p.substr(0, slash);
+}
+
+bool IsDesktopItemPath(const std::wstring& path)
+{
+    const std::wstring dir = FoldCase(ParentDirOf(path));
+    if (dir.empty())
+        return false;
+    const std::wstring userDesk = FoldCase(DesktopFolderPath());
+    const std::wstring pubDesk = FoldCase(PublicDesktopFolderPath());
+    return (!userDesk.empty() && dir == userDesk) || (!pubDesk.empty() && dir == pubDesk);
+}
+
 void LaunchFile(const std::wstring& path)
 {
     ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -486,7 +516,10 @@ struct DesktopFences::Fence {
     bool locked = false;
     bool alwaysExpanded = true;
     bool listView = false;
+    bool virtualDesktop = false;
+    bool transparent = true;
     float iconScale = 1.f;
+    std::vector<std::wstring> pinnedPaths;
     bool expanded = true;
     bool renaming = false;
     std::wstring editText;
@@ -607,6 +640,7 @@ DesktopFences::DesktopFences(HINSTANCE instance) : instance_(instance)
 
 DesktopFences::~DesktopFences()
 {
+    RestoreAllParkedIcons();
     if (desktopIconsHidden_) {
         if (HWND list = FindDesktopListView())
             ShowWindow(list, SW_SHOWNOACTIVATE);
@@ -651,6 +685,7 @@ LRESULT CALLBACK DesktopFences::HostProc(HWND h, UINT m, WPARAM w, LPARAM l)
             for (const auto& f : g_fences->fences_)
                 if (f->surface && f->surface->Visible())
                     g_fences->QueueReload(*f);
+            g_fences->SyncVirtualDesktopIcons();
             return 0;
         }
         if (m == WM_TIMER && w == kRestackTimer) {
@@ -909,15 +944,30 @@ void DesktopFences::Load()
         std::wstring id = str(L"id");
         std::wstring folder = str(L"folder");
         std::wstring title = str(L"title");
-        if (id.empty() || folder.empty())
+        const bool virtualDesktop = flag(L"virtualDesktop", false);
+        const bool transparent = flag(L"transparent", true);
+        if (id.empty() || (!virtualDesktop && folder.empty()))
             continue;
+        if (virtualDesktop && folder.empty())
+            folder = DesktopFolderPath();
         if (title.empty())
             title = BaseName(folder);
         Fence& loaded = CreateFence(id, title, folder, num(L"x", 80.f), num(L"y", 80.f), std::clamp(num(L"w", 360.f), kMinW, kMaxW),
                                     std::clamp(num(L"h", 420.f), kMinH, kMaxH), flag(L"locked", false), flag(L"alwaysExpanded", false),
-                                    flag(L"listView", false));
+                                    flag(L"listView", false), virtualDesktop, transparent);
         loaded.iconScale = std::clamp(num(L"iconScale", 1.f), 0.65f, 2.25f);
+        if (virtualDesktop && o.HasKey(L"items") && o.GetNamedValue(L"items").ValueType() == json::JsonValueType::Array) {
+            for (const auto& itemVal : o.GetNamedArray(L"items")) {
+                if (itemVal.ValueType() == json::JsonValueType::String) {
+                    const std::wstring p = std::wstring(itemVal.GetString());
+                    if (!p.empty())
+                        loaded.pinnedPaths.push_back(p);
+                }
+            }
+            QueueReload(loaded, true);
+        }
     }
+    SyncVirtualDesktopIcons();
 }
 
 void DesktopFences::Save() const
@@ -935,7 +985,15 @@ void DesktopFences::Save() const
         o.SetNamedValue(L"locked", json::JsonValue::CreateBooleanValue(f->locked));
         o.SetNamedValue(L"alwaysExpanded", json::JsonValue::CreateBooleanValue(f->alwaysExpanded));
         o.SetNamedValue(L"listView", json::JsonValue::CreateBooleanValue(f->listView));
+        o.SetNamedValue(L"virtualDesktop", json::JsonValue::CreateBooleanValue(f->virtualDesktop));
+        o.SetNamedValue(L"transparent", json::JsonValue::CreateBooleanValue(f->transparent));
         o.SetNamedValue(L"iconScale", json::JsonValue::CreateNumberValue(f->iconScale));
+        if (f->virtualDesktop) {
+            json::JsonArray itemsArr;
+            for (const auto& p : f->pinnedPaths)
+                itemsArr.Append(json::JsonValue::CreateStringValue(p));
+            o.SetNamedValue(L"items", itemsArr);
+        }
         arr.Append(o);
     }
     json::JsonObject root;
@@ -953,7 +1011,7 @@ void DesktopFences::Build()
 }
 
 DesktopFences::Fence& DesktopFences::CreateFence(const std::wstring& id, const std::wstring& title, const std::wstring& folder, float x, float y, float w,
-                                                 float h, bool locked, bool alwaysExpanded, bool listView)
+                                                 float h, bool locked, bool alwaysExpanded, bool listView, bool virtualDesktop, bool transparent)
 {
     auto f = std::make_unique<Fence>();
     f->id = id;
@@ -966,8 +1024,11 @@ DesktopFences::Fence& DesktopFences::CreateFence(const std::wstring& id, const s
     f->locked = locked;
     f->alwaysExpanded = alwaysExpanded;
     f->listView = listView;
+    f->virtualDesktop = virtualDesktop;
+    f->transparent = transparent;
     f->expanded = alwaysExpanded;
     f->surface = std::make_unique<Surface>(instance_, L"Atrium Fence", true, 12.f, true);
+    f->surface->SetGlassless(transparent);
     f->surface->SetRadius(radius_);
     f->surface->ReserveResize(D2D1::SizeF(w, h));
     Fence* raw = f.get();
@@ -991,12 +1052,17 @@ void DesktopFences::RemoveFence(const std::wstring& id)
     for (auto it = fences_.begin(); it != fences_.end(); ++it) {
         if ((*it)->id != id)
             continue;
+        std::vector<std::wstring> toRestore;
+        if ((*it)->virtualDesktop)
+            toRestore = (*it)->pinnedPaths;
         if ((*it)->surface) {
             if ((*it)->dropTarget)
                 RevokeDragDrop((*it)->surface->Hwnd());
             (*it)->surface->Hide(false);
         }
         fences_.erase(it);
+        for (const auto& p : toRestore)
+            RestoreDesktopIcon(p);
         Save();
         return;
     }
@@ -1004,15 +1070,12 @@ void DesktopFences::RemoveFence(const std::wstring& id)
 
 void DesktopFences::AddNewFence()
 {
-    const std::wstring baseDir = DefaultFencesDir();
-    SHCreateDirectoryExW(nullptr, baseDir.c_str(), nullptr);
     const std::wstring id = L"fence-" + std::to_wstring(GetTickCount64());
     const int num = int(fences_.size()) + 1;
     const std::wstring title = TrFormat(L"Desktop Box %d", num);
-    const std::wstring folder = baseDir + L"\\" + id;
-    SHCreateDirectoryExW(nullptr, folder.c_str(), nullptr);
+    const std::wstring desktop = DesktopFolderPath();
     const float offset = float((fences_.size() % 5) * 32);
-    CreateFence(id, title, folder, 120.f + offset, 60.f + offset, 360.f, 420.f, false, false);
+    CreateFence(id, title, desktop, 120.f + offset, 60.f + offset, 360.f, 420.f, false, false, false, true, true);
     Save();
 }
 
@@ -1062,7 +1125,7 @@ void DesktopFences::QueueReload(Fence& f, bool force)
     {
         std::lock_guard g(mutex_);
         std::erase_if(jobs_, [&](const LoadJob& j) { return j.id == f.id; });
-        jobs_.push_back({f.id, f.folder, gen, f.loadSignature, force, iconPx});
+        jobs_.push_back({f.id, f.folder, f.virtualDesktop, f.pinnedPaths, gen, f.loadSignature, force, iconPx});
     }
     cv_.notify_one();
 }
@@ -1085,36 +1148,56 @@ void DesktopFences::WorkerLoop()
         res.gen = job.gen;
         struct Entry { Item item; };
         std::vector<Entry> entries;
-        std::wstring pattern = job.folder;
-        if (!pattern.empty() && pattern.back() != L'\\' && pattern.back() != L'/')
-            pattern += L'\\';
-        const std::wstring base = pattern;
-        pattern += L'*';
-        WIN32_FIND_DATAW fd{};
-        HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
         uint64_t signature = 14695981039346656037ull;
         auto mix = [&](uint64_t value) {
             signature ^= value;
             signature *= 1099511628211ull;
         };
-        if (h != INVALID_HANDLE_VALUE) {
-            do {
-                if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
-                    continue;
-                if (fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM))
+        if (job.virtualDesktop) {
+            for (const std::wstring& path : job.pinnedPaths) {
+                WIN32_FILE_ATTRIBUTE_DATA fad{};
+                if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
                     continue;
                 Item item;
-                item.isDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-                item.path = base + fd.cFileName;
-                item.name = DisplayNameFor(fd.cFileName, item.isDir);
-                for (wchar_t ch : fd.cFileName)
+                item.isDir = (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                item.path = path;
+                item.name = DisplayNameFor(BaseName(path), item.isDir);
+                for (wchar_t ch : path)
                     mix(uint16_t(ch));
-                mix(fd.dwFileAttributes);
-                mix((uint64_t(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow);
-                mix((uint64_t(fd.ftLastWriteTime.dwHighDateTime) << 32) | fd.ftLastWriteTime.dwLowDateTime);
+                mix(fad.dwFileAttributes);
+                mix((uint64_t(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow);
+                mix((uint64_t(fad.ftLastWriteTime.dwHighDateTime) << 32) | fad.ftLastWriteTime.dwLowDateTime);
                 entries.push_back({std::move(item)});
-            } while (FindNextFileW(h, &fd) && entries.size() < 256);
-            FindClose(h);
+                if (entries.size() >= 256)
+                    break;
+            }
+        } else {
+            std::wstring pattern = job.folder;
+            if (!pattern.empty() && pattern.back() != L'\\' && pattern.back() != L'/')
+                pattern += L'\\';
+            const std::wstring base = pattern;
+            pattern += L'*';
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+            if (h != INVALID_HANDLE_VALUE) {
+                do {
+                    if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
+                        continue;
+                    if (fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM))
+                        continue;
+                    Item item;
+                    item.isDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                    item.path = base + fd.cFileName;
+                    item.name = DisplayNameFor(fd.cFileName, item.isDir);
+                    for (wchar_t ch : fd.cFileName)
+                        mix(uint16_t(ch));
+                    mix(fd.dwFileAttributes);
+                    mix((uint64_t(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow);
+                    mix((uint64_t(fd.ftLastWriteTime.dwHighDateTime) << 32) | fd.ftLastWriteTime.dwLowDateTime);
+                    entries.push_back({std::move(item)});
+                } while (FindNextFileW(h, &fd) && entries.size() < 256);
+                FindClose(h);
+            }
         }
         res.signature = signature;
         if (!job.force && signature == job.previousSignature) {
@@ -1160,11 +1243,19 @@ void DesktopFences::ApplyLoadResult(LoadResult res)
 
 void DesktopFences::PaintFence(Fence& f, Canvas& c)
 {
-    const Theme& t = c.theme;
+    Theme t = c.theme;
     const float w = f.w;
     const float h = f.expanded ? f.h : kHeaderH;
-    if (c.panel)
+    if (f.transparent) {
+        c.Fill(D2D1::RectF(0, 0, w, h), radius_, D2D1::ColorF(0.f, 0.f, 0.f, f.expanded ? 0.14f : 0.24f));
+        c.Stroke(D2D1::RectF(0.5f, 0.5f, w - 0.5f, h - 0.5f), std::max(4.f, radius_ - 0.5f), D2D1::ColorF(1.f, 1.f, 1.f, 0.24f), 1.f);
+        t.text = D2D1::ColorF(1.f, 1.f, 1.f, 0.96f);
+        t.subtext = D2D1::ColorF(1.f, 1.f, 1.f, 0.78f);
+        t.hover = D2D1::ColorF(1.f, 1.f, 1.f, 0.16f);
+        t.divider = D2D1::ColorF(1.f, 1.f, 1.f, 0.18f);
+    } else if (c.panel) {
         c.Fill(D2D1::RectF(0, 0, w, h), radius_, t.panel);
+    }
     if (f.dragHighlight)
         c.Stroke(D2D1::RectF(1.5f, 1.5f, w - 1.5f, h - 1.5f), std::max(4.f, radius_ - 1.5f), D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.85f), 2.f);
 
@@ -1301,8 +1392,145 @@ void DesktopFences::HandleDragLeave(Fence& f)
         SetTimer(f.surface->Hwnd(), kCollapseTimer, kCollapseDelayMs, nullptr);
 }
 
+void DesktopFences::ParkDesktopIcon(const std::wstring& path)
+{
+    if (path.empty())
+        return;
+    winrt::com_ptr<IFolderView2> view;
+    if (!GetDesktopFolderView(view))
+        return;
+    winrt::com_ptr<IShellFolder> folder;
+    if (FAILED(view->GetFolder(IID_PPV_ARGS(folder.put()))) || !folder)
+        if (FAILED(SHGetDesktopFolder(folder.put())) || !folder)
+            return;
+    int count = 0;
+    if (FAILED(view->ItemCount(SVGIO_ALLVIEW, &count)))
+        return;
+    const std::wstring target = FoldCase(path);
+    for (int i = 0; i < count; ++i) {
+        PITEMID_CHILD pidl = nullptr;
+        if (FAILED(view->Item(i, &pidl)) || !pidl)
+            continue;
+        STRRET sr{};
+        PWSTR raw = nullptr;
+        bool matched = false;
+        if (SUCCEEDED(folder->GetDisplayNameOf(pidl, SHGDN_FORPARSING, &sr)) && SUCCEEDED(StrRetToStrW(&sr, pidl, &raw)) && raw) {
+            matched = FoldCase(raw) == target;
+            CoTaskMemFree(raw);
+        }
+        if (matched) {
+            POINT cur{};
+            if (SUCCEEDED(view->GetItemPosition(pidl, &cur)) && cur.x > -20000 && cur.y > -20000)
+                savedIconPositions_.try_emplace(target, cur);
+            POINT off{-30000, -30000};
+            LPCITEMIDLIST arr[1] = {pidl};
+            view->SelectAndPositionItems(1, arr, &off, SVSI_POSITIONITEM);
+            CoTaskMemFree(pidl);
+            return;
+        }
+        CoTaskMemFree(pidl);
+    }
+}
+
+void DesktopFences::RestoreDesktopIcon(const std::wstring& path, const POINT* preferredScreen)
+{
+    if (path.empty())
+        return;
+    winrt::com_ptr<IFolderView2> view;
+    if (!GetDesktopFolderView(view))
+        return;
+    winrt::com_ptr<IShellFolder> folder;
+    if (FAILED(view->GetFolder(IID_PPV_ARGS(folder.put()))) || !folder)
+        if (FAILED(SHGetDesktopFolder(folder.put())) || !folder)
+            return;
+    int count = 0;
+    if (FAILED(view->ItemCount(SVGIO_ALLVIEW, &count)))
+        return;
+    const std::wstring target = FoldCase(path);
+    POINT restorePt{80, 80};
+    if (preferredScreen) {
+        restorePt = *preferredScreen;
+        if (HWND list = FindDesktopListView())
+            ScreenToClient(list, &restorePt);
+    } else if (auto it = savedIconPositions_.find(target); it != savedIconPositions_.end() && it->second.x > -20000 && it->second.y > -20000) {
+        restorePt = it->second;
+    }
+    for (int i = 0; i < count; ++i) {
+        PITEMID_CHILD pidl = nullptr;
+        if (FAILED(view->Item(i, &pidl)) || !pidl)
+            continue;
+        STRRET sr{};
+        PWSTR raw = nullptr;
+        bool matched = false;
+        if (SUCCEEDED(folder->GetDisplayNameOf(pidl, SHGDN_FORPARSING, &sr)) && SUCCEEDED(StrRetToStrW(&sr, pidl, &raw)) && raw) {
+            matched = FoldCase(raw) == target;
+            CoTaskMemFree(raw);
+        }
+        if (matched) {
+            LPCITEMIDLIST arr[1] = {pidl};
+            view->SelectAndPositionItems(1, arr, &restorePt, SVSI_POSITIONITEM);
+            CoTaskMemFree(pidl);
+            savedIconPositions_.erase(target);
+            return;
+        }
+        CoTaskMemFree(pidl);
+    }
+    savedIconPositions_.erase(target);
+}
+
+void DesktopFences::SyncVirtualDesktopIcons()
+{
+    for (const auto& f : fences_)
+        if (f->virtualDesktop)
+            for (const auto& p : f->pinnedPaths)
+                ParkDesktopIcon(p);
+}
+
+void DesktopFences::RestoreAllParkedIcons()
+{
+    for (const auto& f : fences_)
+        if (f->virtualDesktop)
+            for (const auto& p : f->pinnedPaths)
+                RestoreDesktopIcon(p);
+    savedIconPositions_.clear();
+}
+
 void DesktopFences::HandleDropFiles(Fence& f, const std::vector<std::wstring>& paths, bool copy)
 {
+    if (f.virtualDesktop) {
+        const std::wstring desktop = DesktopFolderPath();
+        bool changed = false;
+        for (const std::wstring& path : paths) {
+            std::wstring targetPath = path;
+            if (!IsDesktopItemPath(path)) {
+                if (desktop.empty() || !CopyOrMovePath(path, desktop, copy))
+                    continue;
+                targetPath = desktop + L"\\" + BaseName(path);
+                if (GetFileAttributesW(targetPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+                    continue;
+                SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW, desktop.c_str(), nullptr);
+            }
+            const std::wstring folded = FoldCase(targetPath);
+            for (const auto& other : fences_) {
+                if (other.get() == &f || !other->virtualDesktop)
+                    continue;
+                const size_t before = other->pinnedPaths.size();
+                std::erase_if(other->pinnedPaths, [&](const std::wstring& p) { return FoldCase(p) == folded; });
+                if (other->pinnedPaths.size() != before)
+                    QueueReload(*other, true);
+            }
+            const bool exists = std::ranges::any_of(f.pinnedPaths, [&](const std::wstring& p) { return FoldCase(p) == folded; });
+            if (!exists) {
+                f.pinnedPaths.push_back(targetPath);
+                changed = true;
+            }
+            ParkDesktopIcon(targetPath);
+        }
+        if (changed)
+            Save();
+        QueueReload(f, true);
+        return;
+    }
     SHCreateDirectoryExW(nullptr, f.folder.c_str(), nullptr);
     int moved = 0;
     for (const std::wstring& path : paths) {
@@ -1350,6 +1578,16 @@ void DesktopFences::EndRename(Fence& f, bool commit)
 
 void DesktopFences::MoveItemToDesktop(Fence& f, const Item& item)
 {
+    if (f.virtualDesktop) {
+        const std::wstring folded = FoldCase(item.path);
+        const size_t before = f.pinnedPaths.size();
+        std::erase_if(f.pinnedPaths, [&](const std::wstring& p) { return FoldCase(p) == folded; });
+        if (f.pinnedPaths.size() != before)
+            Save();
+        RestoreDesktopIcon(item.path);
+        QueueReload(f, true);
+        return;
+    }
     const std::wstring desktop = DesktopFolderPath();
     if (desktop.empty())
         return;
@@ -1390,10 +1628,11 @@ void DesktopFences::ShowFenceMenu(Fence& f, POINT screen, int itemIndex)
         {f.title, 0, false, true, true},
         {Tr(L"Rename fence"), 18},
         {Tr(L"List view"), 19, f.listView},
+        {Tr(L"Transparent style"), 20, f.transparent},
         {Tr(L"Always expanded"), 10, f.alwaysExpanded},
         {Tr(L"Lock position"), 11, f.locked},
         {},
-        {Tr(L"Change mapped folder…"), 12},
+        {Tr(L"Change mapped folder…"), 12, false, f.virtualDesktop},
         {Tr(L"Open in Explorer"), 13},
         {Tr(L"Refresh"), 14},
         {},
@@ -1444,6 +1683,13 @@ void DesktopFences::ShowFenceMenu(Fence& f, POINT screen, int itemIndex)
             target->scrollY = 0;
             if (target->surface)
                 target->surface->Invalidate();
+            Save();
+        } else if (cmd == 20) {
+            target->transparent = !target->transparent;
+            if (target->surface) {
+                target->surface->SetGlassless(target->transparent);
+                target->surface->Invalidate();
+            }
             Save();
         }
     });
@@ -1496,7 +1742,32 @@ bool DesktopFences::HandleFenceMessage(Fence& f, UINT m, WPARAM wp, LPARAM lp, L
                     ReleaseCapture();
                 f.surface->Invalidate();
                 const DWORD effect = BeginShellDrag(f.surface->Hwnd(), dragged.path);
-                if (effect & DROPEFFECT_MOVE) {
+                if (f.virtualDesktop) {
+                    POINT dropPt{};
+                    GetCursorPos(&dropPt);
+                    bool insideAnyFence = false;
+                    for (const auto& other : fences_) {
+                        if (other->surface && other->surface->Visible()) {
+                            const RECT r = other->surface->Rect();
+                            if (PtInRect(&r, dropPt)) {
+                                insideAnyFence = true;
+                                break;
+                            }
+                        }
+                    }
+                    const bool fileGone = GetFileAttributesW(dragged.path.c_str()) == INVALID_FILE_ATTRIBUTES;
+                    if (!insideAnyFence || (effect & DROPEFFECT_MOVE) || fileGone) {
+                        const std::wstring folded = FoldCase(dragged.path);
+                        const size_t before = f.pinnedPaths.size();
+                        std::erase_if(f.pinnedPaths, [&](const std::wstring& p) { return FoldCase(p) == folded; });
+                        if (f.pinnedPaths.size() != before)
+                            Save();
+                        if (!fileGone && !insideAnyFence && !(effect & DROPEFFECT_MOVE))
+                            RestoreDesktopIcon(dragged.path, &dropPt);
+                        f.loadSignature = 0;
+                        QueueReload(f, true);
+                    }
+                } else if (effect & DROPEFFECT_MOVE) {
                     std::erase_if(f.items, [&](const Item& item) { return item.path == dragged.path; });
                     f.loadSignature = 0;
                     QueueReload(f, true);

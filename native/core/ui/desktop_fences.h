@@ -15,6 +15,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace atrium {
@@ -48,6 +49,8 @@ private:
     struct LoadJob {
         std::wstring id;
         std::wstring folder;
+        bool virtualDesktop = false;
+        std::vector<std::wstring> pinnedPaths;
         uint64_t gen = 0;
         uint64_t previousSignature = 0;
         bool force = false;
@@ -70,7 +73,7 @@ private:
     void Build();
     void Clear();
     Fence& CreateFence(const std::wstring& id, const std::wstring& title, const std::wstring& folder, float x, float y, float w, float h, bool locked,
-                       bool alwaysExpanded, bool listView = false);
+                       bool alwaysExpanded, bool listView = false, bool virtualDesktop = false, bool transparent = true);
     void RemoveFence(const std::wstring& id);
     Fence* FindFence(const std::wstring& id);
     float Scale() const;
@@ -98,6 +101,10 @@ private:
     void ShowFenceMenu(Fence& f, POINT screen, int itemIndex);
     std::wstring PickFolderDialog(const std::wstring& initial) const;
     void MoveItemToDesktop(Fence& f, const Item& item);
+    void ParkDesktopIcon(const std::wstring& path);
+    void RestoreDesktopIcon(const std::wstring& path, const POINT* preferredScreen = nullptr);
+    void SyncVirtualDesktopIcons();
+    void RestoreAllParkedIcons();
     void BeginRename(Fence& f);
     void EndRename(Fence& f, bool commit);
 
@@ -119,6 +126,7 @@ private:
     uint64_t nextGen_ = 1;
     ULONGLONG lastDesktopClickMs_ = 0;
     POINT lastDesktopClick_{};
+    std::unordered_map<std::wstring, POINT> savedIconPositions_;
     std::vector<std::unique_ptr<Fence>> fences_;
 
     std::mutex mutex_;
