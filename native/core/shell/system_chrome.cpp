@@ -102,13 +102,53 @@ void RefitMaximized()
         0);
 }
 
+void SetTaskbarAlpha(HWND w, BYTE alpha)
+{
+    if (!w)
+        return;
+    const LONG_PTR ex = GetWindowLongPtrW(w, GWL_EXSTYLE);
+    if (!(ex & WS_EX_LAYERED))
+        SetWindowLongPtrW(w, GWL_EXSTYLE, ex | WS_EX_LAYERED);
+    SetLayeredWindowAttributes(w, 0, alpha, LWA_ALPHA);
+}
+
+void RestoreTaskbarAlpha(HWND w)
+{
+    if (!w)
+        return;
+    const LONG_PTR ex = GetWindowLongPtrW(w, GWL_EXSTYLE);
+    if (ex & WS_EX_LAYERED) {
+        SetLayeredWindowAttributes(w, 0, 255, LWA_ALPHA);
+        SetWindowLongPtrW(w, GWL_EXSTYLE, ex & ~WS_EX_LAYERED);
+    }
+}
+
 void ShowTaskbars()
 {
     // Also used by the exception filter: enumerate without allocating.
-    if (HWND w = ShellTaskbar())
+    if (HWND w = ShellTaskbar()) {
+        RestoreTaskbarAlpha(w);
         ShowWindowAsync(w, SW_SHOWNA);
-    for (HWND w = nullptr; (w = FindWindowExW(nullptr, w, L"Shell_SecondaryTrayWnd", nullptr)) != nullptr;)
+    }
+    for (HWND w = nullptr; (w = FindWindowExW(nullptr, w, L"Shell_SecondaryTrayWnd", nullptr)) != nullptr;) {
+        RestoreTaskbarAlpha(w);
         ShowWindowAsync(w, SW_SHOWNA);
+    }
+}
+
+void RevealTaskbarsForClick()
+{
+    const bool keepStealth = g_taskbarVisibility.hidden.load();
+    if (HWND w = ShellTaskbar()) {
+        if (keepStealth)
+            SetTaskbarAlpha(w, 1);
+        ShowWindowAsync(w, SW_SHOWNA);
+    }
+    for (HWND w = nullptr; (w = FindWindowExW(nullptr, w, L"Shell_SecondaryTrayWnd", nullptr)) != nullptr;) {
+        if (keepStealth)
+            SetTaskbarAlpha(w, 1);
+        ShowWindowAsync(w, SW_SHOWNA);
+    }
 }
 
 // AutoPlay's "a drive was inserted" toast is one of the system notifications
@@ -459,7 +499,7 @@ bool SystemChrome::RevealForClick()
     if (g_taskbarVisibility.stopping)
         return false;
     ++g_taskbarVisibility.reveals;
-    ShowTaskbars();
+    RevealTaskbarsForClick();
     const HWND shell = ShellTaskbar();
     for (int i = 0; i < 20 && shell && !IsWindowVisible(shell) && !g_taskbarVisibility.stopping; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -616,9 +656,13 @@ void SystemChrome::HideTaskbars()
 {
     if (!g_taskbarVisibility.ShouldHide())
         return;
-    for (HWND w : Taskbars())
-        if (g_taskbarVisibility.ShouldHide() && IsWindowVisible(w))
+    for (HWND w : Taskbars()) {
+        if (!g_taskbarVisibility.ShouldHide())
+            break;
+        SetTaskbarAlpha(w, 0);
+        if (IsWindowVisible(w))
             ShowWindowAsync(w, SW_HIDE);
+    }
     if (HWND overflow = FindWindowW(L"NotifyIconOverflowWindow", nullptr); g_taskbarVisibility.ShouldHide() && overflow && IsWindowVisible(overflow))
         ShowWindowAsync(overflow, SW_HIDE);
     // A concurrent reveal or exit can have restored the taskbar while a
