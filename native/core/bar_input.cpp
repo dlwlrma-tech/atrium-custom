@@ -124,8 +124,12 @@ bool Bar::HandleInputTimer(HWND h, WPARAM w)
         return true;
     case kFileHoverTimer:
         KillTimer(h, kFileHoverTimer);
-        if (!fileHoverKey_.empty() && !IsEntry(fileHoverKey_) && onFileDragHover)
+        if (fileHoverKey_ == kDesktopKey) {
+            if (onDesktopClick)
+                onDesktopClick();
+        } else if (!fileHoverKey_.empty() && !IsEntry(fileHoverKey_) && onFileDragHover) {
             onFileDragHover(fileHoverKey_);
+        }
         return true;
     case kGuardTimer: GuardStacking(nullptr); return true;
     case kSlideTimer:
@@ -389,7 +393,7 @@ std::wstring Bar::FileDragOver(POINT screen)
     onInteract();
     ScreenToClient(input_, &screen);
     std::wstring key = HitTest(LayoutPoint(screen));
-    if (IsEntry(key))
+    if (IsEntry(key) && key != kDesktopKey)
         key.clear();
     if (key != fileHoverKey_) {
         fileHoverKey_ = key;

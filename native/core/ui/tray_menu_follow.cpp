@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iterator>
+#include <utility>
 
 namespace atrium {
 
@@ -24,6 +25,7 @@ struct MenuFollow {
     HWINEVENTHOOK hook = nullptr;
     POINT at{};
     RECT avoidBar{};
+    std::function<RECT()> currentBar;
     std::wstring exe;
     UINT_PTR timer = 0;
     DWORD pid = 0;
@@ -31,12 +33,30 @@ struct MenuFollow {
     ULONGLONG until = 0;
     HWND menu = nullptr; // the menu moved: put back if the app moves it again meanwhile
     POINT placed{};
-    int moves = 0;
 } g_follow;
 
 void CALLBACK FollowExpired(HWND, UINT, UINT_PTR timer, DWORD)
 {
-    if (timer == g_follow.timer && GetTickCount64() >= g_follow.until)
+    if (timer != g_follow.timer)
+        return;
+    if (g_follow.menu) {
+        if (!IsWindow(g_follow.menu) || !IsWindowVisible(g_follow.menu)) {
+            StopTrayMenuFollow();
+            return;
+        }
+        if (g_follow.currentBar)
+            g_follow.avoidBar = g_follow.currentBar();
+        RECT r{};
+        if (GetWindowRect(g_follow.menu, &r)) {
+            const POINT p = MenuPlace(g_follow.at, r.right - r.left, r.bottom - r.top, g_follow.avoidBar);
+            if (std::abs(r.left - p.x) > 2 || std::abs(r.top - p.y) > 2) {
+                if (SetWindowPos(g_follow.menu, HWND_TOPMOST, p.x, p.y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE))
+                    g_follow.placed = p;
+            }
+        }
+        return;
+    }
+    if (GetTickCount64() >= g_follow.until)
         StopTrayMenuFollow();
 }
 
@@ -77,19 +97,32 @@ bool FollowCancelKeyDown()
 
 void CALLBACK MenuShown(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD, DWORD)
 {
+    if (event == EVENT_OBJECT_HIDE) {
+        if (hwnd == g_follow.menu && idObject == OBJID_WINDOW && idChild == CHILDID_SELF)
+            StopTrayMenuFollow();
+        return;
+    }
     if (event != EVENT_OBJECT_SHOW && event != EVENT_OBJECT_LOCATIONCHANGE)
         return;
-    if (GetTickCount64() > g_follow.until) {
+    if (!g_follow.menu && GetTickCount64() > g_follow.until) {
         StopTrayMenuFollow();
         return;
     }
-    LASTINPUTINFO input{sizeof(input)};
-    POINT cursor{};
-    const SIZE dblClick{GetSystemMetrics(SM_CXDOUBLECLK), GetSystemMetrics(SM_CYDOUBLECLK)};
-    // The panel's click, or the real click the model sent for it; ignore small pointer jitter.
-    if (!GetLastInputInfo(&input) || !GetCursorPos(&cursor) ||
-        TrayFollowCancelled(input.dwTime, g_follow.clickInput, TrayModel::LastSyntheticInput(), TrayModel::SyntheticPointerInFlight(), g_follow.at, cursor,
-                            dblClick, FollowCancelKeyDown())) {
+    bool cancelled = false;
+    if (g_follow.menu) {
+        // Pointer movement is expected while a menu is open; only a new button
+        // or key action should stop following it.
+        cancelled = FollowCancelKeyDown();
+    } else {
+        LASTINPUTINFO input{sizeof(input)};
+        POINT cursor{};
+        const SIZE dblClick{GetSystemMetrics(SM_CXDOUBLECLK), GetSystemMetrics(SM_CYDOUBLECLK)};
+        // Before a menu appears, avoid moving a later popup after the user has moved on.
+        cancelled = !GetLastInputInfo(&input) || !GetCursorPos(&cursor) ||
+                    TrayFollowCancelled(input.dwTime, g_follow.clickInput, TrayModel::LastSyntheticInput(), TrayModel::SyntheticPointerInFlight(),
+                                        g_follow.at, cursor, dblClick, FollowCancelKeyDown());
+    }
+    if (cancelled) {
         StopTrayMenuFollow(); // a later user action must not have its menu moved by this click
         return;
     }
@@ -137,10 +170,11 @@ void CALLBACK MenuShown(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LO
         if (hwnd != g_follow.menu || !IsWindowVisible(hwnd) || !GetWindowRect(hwnd, &r))
             return;
         // A pixel or two is the app rounding to its scale.
-        if ((std::abs(r.left - g_follow.placed.x) > 2 || std::abs(r.top - g_follow.placed.y) > 2) && g_follow.moves < 3) {
+        if (std::abs(r.left - g_follow.placed.x) > 2 || std::abs(r.top - g_follow.placed.y) > 2) {
+            if (g_follow.currentBar)
+                g_follow.avoidBar = g_follow.currentBar();
             const POINT p = MenuPlace(g_follow.at, r.right - r.left, r.bottom - r.top, g_follow.avoidBar);
             g_follow.placed = p;
-            ++g_follow.moves;
             SetWindowPos(hwnd, HWND_TOPMOST, p.x, p.y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
             Log(L"tray: the menu went to %ld,%ld again: back to %ld,%ld", r.left, r.top, p.x, p.y);
         }
@@ -155,6 +189,8 @@ void CALLBACK MenuShown(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LO
     if (w < 40 || h < 20 || w > (mi.rcWork.right - mi.rcWork.left) * 3 / 5 || h > (mi.rcWork.bottom - mi.rcWork.top) * 19 / 20)
         return; // a mark, a balloon, a window: not a menu
     const POINT at = g_follow.at;
+    if (g_follow.currentBar)
+        g_follow.avoidBar = g_follow.currentBar();
     // Tray apps can place a menu just below our bar and still consider it
     // close enough to the pointer. Always use our placement, which reserves
     // the space on the inner side of the bar (above it for a bottom bar).
@@ -168,11 +204,10 @@ void CALLBACK MenuShown(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LO
     g_follow.menu = hwnd;
     g_follow.pid = pid;
     g_follow.placed = p;
-    g_follow.moves = 0;
-    g_follow.until = GetTickCount64() + 800;
+    g_follow.until = 0; // follow while the menu remains visible
     if (g_follow.timer)
         KillTimer(nullptr, g_follow.timer);
-    g_follow.timer = SetTimer(nullptr, 0, 800, FollowExpired);
+    g_follow.timer = SetTimer(nullptr, 0, 50, FollowExpired);
     if (!g_follow.timer)
         StopTrayMenuFollow();
 }
@@ -189,9 +224,10 @@ void StopTrayMenuFollow()
         KillTimer(nullptr, g_follow.timer);
     g_follow.timer = 0;
     g_follow.pid = 0;
+    g_follow.currentBar = {};
 }
 
-void FollowTrayMenu(POINT at, const std::wstring& exe, RECT avoidBar)
+void FollowTrayMenu(POINT at, const std::wstring& exe, RECT avoidBar, std::function<RECT()> currentBar)
 {
     StopTrayMenuFollow();
     if (exe.empty() || _wcsicmp(PathFindFileNameW(exe.c_str()), L"explorer.exe") == 0)
@@ -202,6 +238,7 @@ void FollowTrayMenu(POINT at, const std::wstring& exe, RECT avoidBar)
     g_follow.clickInput = input.dwTime;
     g_follow.at = at;
     g_follow.avoidBar = avoidBar;
+    g_follow.currentBar = std::move(currentBar);
     g_follow.exe = exe;
     g_follow.until = GetTickCount64() + 3000; // slow apps take a while to show it
     g_follow.hook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_LOCATIONCHANGE, nullptr, MenuShown, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);

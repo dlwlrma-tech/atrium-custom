@@ -69,7 +69,7 @@ void ConfigureBarTray(Bar& bar, TrayModel& model, std::function<SettingsServer*(
             const RECT barRect = bar.BarRect();
             const POINT anchor{(cell.left + cell.right) / 2, barRect.top - 6};
             model.SetHostPlaces(RECT{cell.left, barRect.top - 24, cell.right, barRect.top - 4});
-            FollowTrayMenu(anchor, icon->exe, barRect);
+            FollowTrayMenu(anchor, icon->exe, barRect, [&bar] { return bar.BarRect(); });
             model.Click(*icon, false, cell);
         }
     };
@@ -84,7 +84,7 @@ void ConfigureBarTray(Bar& bar, TrayModel& model, std::function<SettingsServer*(
         if (const auto icon = FindPinnedTrayIcon(model, pinKey)) {
             const RECT barRect = bar.BarRect();
             model.SetHostPlaces(RECT{cell.left, barRect.top - 24, cell.right, barRect.top - 4});
-            FollowTrayMenu(anchor, icon->exe, barRect);
+            FollowTrayMenu(anchor, icon->exe, barRect, [&bar] { return bar.BarRect(); });
             model.Click(*icon, true, cell);
         }
     };

@@ -4,11 +4,12 @@
 
 #include <windows.h>
 
+#include <functional>
 #include <string>
 
 namespace atrium {
 
-void FollowTrayMenu(POINT at, const std::wstring& exe, RECT avoidBar = {});
+void FollowTrayMenu(POINT at, const std::wstring& exe, RECT avoidBar = {}, std::function<RECT()> currentBar = {});
 void StopTrayMenuFollow();
 
 } // namespace atrium

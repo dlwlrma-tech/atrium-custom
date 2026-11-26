@@ -28,6 +28,7 @@
 #include <winrt/base.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -50,6 +51,49 @@ constexpr UINT_PTR kRestoreTimerId = 0xA702;
 constexpr UINT kCoalesceMs = 30, kRestorePollMs = 50, kRestoreWaitMs = 2000;
 constexpr UINT kWindowIconTimeoutMs = 100; // WM_GETICON on a possibly hung window
 constexpr ULONGLONG kRetryFailedIconMs = 10000;
+
+bool IsOpenAICodexAumid(const std::wstring& aumid)
+{
+    return Lower(aumid).starts_with(L"openai.codex_");
+}
+
+// The Windows ChatGPT package supplies a white mark on an opaque blue tile.
+// Turn only that known tile colour transparent so the mark sits on Atrium's glass.
+void RemoveCodexBlueTile(IconImage& image)
+{
+    if (image.width < 8 || image.height < 8 || image.bgra.size() != size_t(image.width) * size_t(image.height) * 4)
+        return;
+    auto pixel = [&](int x, int y) { return image.bgra.data() + (size_t(y) * size_t(image.width) + size_t(x)) * 4; };
+    const std::array<const uint8_t*, 4> corners{pixel(0, 0), pixel(image.width - 1, 0), pixel(0, image.height - 1),
+                                                pixel(image.width - 1, image.height - 1)};
+    unsigned bg[3]{}; // RGB; source pixels are premultiplied BGRA
+    for (const uint8_t* p : corners) {
+        if (p[3] < 250)
+            return; // already has transparency
+        bg[0] += p[2];
+        bg[1] += p[1];
+        bg[2] += p[0];
+    }
+    for (unsigned& c : bg)
+        c = (c + 2) / 4;
+    if (bg[2] < bg[0] + 70 || bg[2] < bg[1] + 50)
+        return; // do not alter icons without the expected blue tile
+    for (const uint8_t* p : corners)
+        if (std::abs(int(p[2]) - int(bg[0])) > 35 || std::abs(int(p[1]) - int(bg[1])) > 35 || std::abs(int(p[0]) - int(bg[2])) > 35)
+            return; // the tile is not a nearly uniform blue field
+
+    const float dr = float(255 - bg[0]), dg = float(255 - bg[1]);
+    for (size_t i = 0; i < image.bgra.size(); i += 4) {
+        const float r = float(image.bgra[i + 2]), g = float(image.bgra[i + 1]), b = float(image.bgra[i]);
+        const float a = std::clamp(((r - float(bg[0])) / dr + (g - float(bg[1])) / dg) * 0.5f, 0.0f, 1.0f);
+        const float expectedB = float(bg[2]) + a * (255.0f - float(bg[2]));
+        if (std::abs(b - expectedB) > 38.0f)
+            continue; // keep a non-white detail intact
+        const uint8_t alpha = static_cast<uint8_t>(std::lround(a * 255.0f));
+        image.bgra[i] = image.bgra[i + 1] = image.bgra[i + 2] = alpha;
+        image.bgra[i + 3] = alpha;
+    }
+}
 
 // COM for the calling thread, balanced on scope exit. A thread that is already
 // initialised with another model (RPC_E_CHANGED_MODE) just carries on.
@@ -1172,6 +1216,8 @@ struct TaskModel::Impl {
             ok = tryWindowIcons(img);
         if (!ok && !exeIcon && !job.exePath.empty())
             ok = LoadShellImage(job.exePath, job.size, img);
+        if (ok && IsOpenAICodexAumid(job.aumid))
+            RemoveCodexBlueTile(img);
         QueryPerformanceCounter(&t1);
         QueryPerformanceFrequency(&f);
         if (!ok)

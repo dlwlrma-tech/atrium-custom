@@ -13,9 +13,14 @@ class Bar;
 struct BarDropTarget : winrt::implements<BarDropTarget, IDropTarget> {
     Bar* bar;
     bool files = false;
+    bool desktopEntered = false;
+    winrt::com_ptr<IDataObject> data;
+    winrt::com_ptr<IDropTarget> desktopTarget;
     explicit BarDropTarget(Bar* b) : bar(b) {}
 
-    DWORD Effect(POINTL pt);
+    DWORD Effect(DWORD keyState, POINTL pt);
+    bool EnsureDesktopTarget();
+    void LeaveDesktopTarget();
     HRESULT __stdcall DragEnter(IDataObject* data, DWORD, POINTL pt, DWORD* effect) override;
     HRESULT __stdcall DragOver(DWORD, POINTL pt, DWORD* effect) override;
     HRESULT __stdcall DragLeave() override;
